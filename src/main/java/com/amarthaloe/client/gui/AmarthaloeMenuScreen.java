@@ -7,7 +7,9 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.FormattedCharSequence;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 import java.util.ArrayList;
@@ -28,8 +30,15 @@ public class AmarthaloeMenuScreen extends Screen {
     private DarkButton genderBtn, confirmBtn;
     private String selectedGender = "Мужской";
 
-    // Индекс выбранной фракции на большой шкале репутации
-    private int selectedFactionIdx = 3; // По умолчанию Наместники Либры (Правительство)
+    // Репутация
+    private int selectedFactionIdx = 3;
+
+    // Друзья и Мессенджер
+    private EditBox addFriendBox;
+    private EditBox chatInputBox;
+    private String viewingFriendPassportUuid = null; // Если не null, показываем паспорт выбранного друга
+    private String activeChatFriendUuid = null;      // С кем открыт диалог во вкладке СООБЩЕНИЯ
+    private int friendsPage = 0;
 
     public AmarthaloeMenuScreen() {
         super(Component.literal("Amarthaloe Menu"));
@@ -57,6 +66,7 @@ public class AmarthaloeMenuScreen extends Screen {
             String tabName = tabs[i];
             DarkButton btn = new DarkButton(startX, startY + (i * (btnHeight + 4)), btnWidth, btnHeight, Component.literal(tabName), (button) -> {
                 this.currentTab = tabName;
+                this.viewingFriendPassportUuid = null;
                 this.rebuildWidgets();
             });
             btn.setSelected(tabName.equals(currentTab));
@@ -68,6 +78,141 @@ public class AmarthaloeMenuScreen extends Screen {
             case "ИГРОК" -> initPlayerPassportTab();
             case "РЕПУТАЦИЯ" -> initReputationTab();
             case "ТИТУЛЫ" -> initTitlesTab();
+            case "ДРУЗЬЯ" -> initFriendsTab();
+            case "СООБЩЕНИЯ" -> initMessagesTab();
+        }
+    }
+
+    private void initFriendsTab() {
+        if (Minecraft.getInstance().player == null) return;
+        PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
+        int winX = leftPos + 110;
+        int winY = topPos + 8;
+
+        // Если сейчас открыт просмотр паспорта друга — рисуем только кнопку «Назад к списку друзей»
+        if (viewingFriendPassportUuid != null) {
+            DarkButton backBtn = new DarkButton(winX + 14, winY + ySize - 44, 150, 20, Component.literal("◄ Назад к списку друзей"), (b) -> {
+                viewingFriendPassportUuid = null;
+                this.rebuildWidgets();
+            });
+            this.addRenderableWidget(backBtn);
+            return;
+        }
+
+        // Поле ввода ника или РП-имени для добавления в друзья
+        addFriendBox = createField(winX + 12, winY + 24, 210, 18, "", 40, "Введите ник или РП-имя...");
+        DarkButton addBtn = new DarkButton(winX + 228, winY + 24, 102, 18, Component.literal("+ Добавить"), (b) -> {
+            String val = addFriendBox.getValue().trim();
+            if (!val.isEmpty()) {
+                PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("ADD_FRIEND", val, ""));
+                addFriendBox.setValue("");
+            }
+        });
+        this.addRenderableWidget(addBtn);
+
+        int currentY = winY + 52;
+
+        // 1. Входящие заявки в друзья (показываем до 2 сверху, если есть)
+        List<String> reqs = new ArrayList<>(data.incomingRequests);
+        for (int i = 0; i < Math.min(2, reqs.size()); i++) {
+            String reqUuid = reqs.get(i);
+            int rowY = currentY + i * 24;
+
+            DarkButton acceptBtn = new DarkButton(winX + 206, rowY, 60, 18, Component.literal("Принять"), (b) -> {
+                PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("ACCEPT_FRIEND", reqUuid, ""));
+                data.incomingRequests.remove(reqUuid);
+                data.friends.add(reqUuid);
+                this.rebuildWidgets();
+            });
+            DarkButton declineBtn = new DarkButton(winX + 270, rowY, 60, 18, Component.literal("Отклонить"), (b) -> {
+                PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("DECLINE_FRIEND", reqUuid, ""));
+                data.incomingRequests.remove(reqUuid);
+                this.rebuildWidgets();
+            });
+            this.addRenderableWidget(acceptBtn);
+            this.addRenderableWidget(declineBtn);
+        }
+
+        if (!reqs.isEmpty()) {
+            currentY += Math.min(2, reqs.size()) * 24 + 14;
+        } else {
+            currentY += 12;
+        }
+
+        // 2. Список друзей с быстрыми кнопками: [Паспорт] [ЛС] [В группу] [✖]
+        List<String> friendList = new ArrayList<>(data.friends);
+        int perPage = 5;
+        int startIdx = friendsPage * perPage;
+
+        for (int i = 0; i < perPage && (startIdx + i) < friendList.size(); i++) {
+            String fUuid = friendList.get(startIdx + i);
+            int rowY = currentY + i * 32;
+
+            // Кнопка: Паспорт
+            DarkButton passBtn = new DarkButton(winX + 142, rowY + 4, 54, 18, Component.literal("Паспорт"), (b) -> {
+                this.viewingFriendPassportUuid = fUuid;
+                this.rebuildWidgets();
+            });
+            // Кнопка: Написать в ЛС
+            DarkButton dmBtn = new DarkButton(winX + 199, rowY + 4, 34, 18, Component.literal("ЛС"), (b) -> {
+                this.activeChatFriendUuid = fUuid;
+                this.currentTab = "СООБЩЕНИЯ";
+                this.rebuildWidgets();
+            });
+            // Кнопка: Пригласить в группу
+            DarkButton partyBtn = new DarkButton(winX + 236, rowY + 4, 68, 18, Component.literal("+ В группу"), (b) -> {
+                PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("INVITE_PARTY", fUuid, ""));
+            });
+            // Кнопка: Удалить
+            DarkButton delBtn = new DarkButton(winX + 307, rowY + 4, 20, 18, Component.literal("✖"), (b) -> {
+                PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("REMOVE_FRIEND", fUuid, ""));
+                data.friends.remove(fUuid);
+                this.rebuildWidgets();
+            });
+
+            this.addRenderableWidget(passBtn);
+            this.addRenderableWidget(dmBtn);
+            this.addRenderableWidget(partyBtn);
+            this.addRenderableWidget(delBtn);
+        }
+    }
+
+    private void initMessagesTab() {
+        if (Minecraft.getInstance().player == null) return;
+        PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
+        int winX = leftPos + 110;
+        int winY = topPos + 8;
+
+        List<String> friendList = new ArrayList<>(data.friends);
+        if (activeChatFriendUuid == null && !friendList.isEmpty()) {
+            activeChatFriendUuid = friendList.get(0);
+        }
+
+        // Левая колонка контактов внутри вкладки СООБЩЕНИЯ
+        for (int i = 0; i < Math.min(8, friendList.size()); i++) {
+            String fUuid = friendList.get(i);
+            CompoundTag prof = data.knownProfiles.get(fUuid);
+            String name = prof != null ? prof.getString("rpName") : "Друг";
+            if (name.length() > 11) name = name.substring(0, 11) + ".";
+
+            DarkButton contactBtn = new DarkButton(winX + 10, winY + 28 + i * 24, 90, 20, Component.literal(name), (b) -> {
+                activeChatFriendUuid = fUuid;
+                this.rebuildWidgets();
+            });
+            contactBtn.setSelected(fUuid.equals(activeChatFriendUuid));
+            this.addRenderableWidget(contactBtn);
+        }
+
+        if (activeChatFriendUuid != null) {
+            chatInputBox = createField(winX + 108, winY + ySize - 42, 165, 18, "", 120, "Написать сообщение...");
+            DarkButton sendBtn = new DarkButton(winX + 277, winY + ySize - 42, 55, 18, Component.literal("Отпр."), (b) -> {
+                String msg = chatInputBox.getValue().trim();
+                if (!msg.isEmpty()) {
+                    PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("SEND_DM", activeChatFriendUuid, msg));
+                    chatInputBox.setValue("");
+                }
+            });
+            this.addRenderableWidget(sendBtn);
         }
     }
 
@@ -75,11 +220,10 @@ public class AmarthaloeMenuScreen extends Screen {
         int mainWinX = leftPos + 110;
         int mainWinY = topPos + 8;
 
-        // Стрелочки переключения фракций слева и справа от главной шкалы (как на эскизе)
-        DarkButton prevBtn = new DarkButton(mainWinX + 12, mainWinY + 42, 22, 24, Component.literal("◄"), (btn) -> {
+        DarkButton prevBtn = new DarkButton(mainWinX + 12, mainWinY + 38, 22, 24, Component.literal("◄"), (btn) -> {
             selectedFactionIdx = (selectedFactionIdx - 1 + Faction.values().length) % Faction.values().length;
         });
-        DarkButton nextBtn = new DarkButton(mainWinX + 308, mainWinY + 42, 22, 24, Component.literal("►"), (btn) -> {
+        DarkButton nextBtn = new DarkButton(mainWinX + 308, mainWinY + 38, 22, 24, Component.literal("►"), (btn) -> {
             selectedFactionIdx = (selectedFactionIdx + 1) % Faction.values().length;
         });
 
@@ -100,7 +244,7 @@ public class AmarthaloeMenuScreen extends Screen {
         for (int i = 0; i < factions.length; i++) {
             Faction f = factions[i];
             int rep = data.getRep(f);
-            boolean unlocked = Math.abs(rep) >= 10; // Титул действует от +10 или -10
+            boolean unlocked = Math.abs(rep) >= 10;
             boolean isEquipped = f.id.equals(data.activeTitleFaction);
 
             String btnLabel = !unlocked ? "Недоступно (нужно ±10)" : (isEquipped ? "СНЯТЬ ТИТУЛ" : "ВЫБРАТЬ");
@@ -213,9 +357,126 @@ public class AmarthaloeMenuScreen extends Screen {
             case "ИГРОК" -> renderPassportContent(guiGraphics, mainWinX, mainWinY);
             case "РЕПУТАЦИЯ" -> renderReputationContent(guiGraphics, mainWinX, mainWinY);
             case "ТИТУЛЫ" -> renderTitlesContent(guiGraphics, mainWinX, mainWinY);
+            case "ДРУЗЬЯ" -> renderFriendsContent(guiGraphics, mainWinX, mainWinY);
+            case "СООБЩЕНИЯ" -> renderMessagesContent(guiGraphics, mainWinX, mainWinY);
             default -> {
                 guiGraphics.drawString(this.font, "РАЗДЕЛ: " + currentTab, mainWinX + 15, mainWinY + 15, 0xFFE0C068);
                 guiGraphics.drawString(this.font, "Модуль в разработке...", mainWinX + 15, mainWinY + 35, 0xFF777777);
+            }
+        }
+    }
+
+    private void renderFriendsContent(GuiGraphics g, int winX, int winY) {
+        if (Minecraft.getInstance().player == null) return;
+        PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
+
+        // Режим просмотра паспорта выбранного друга
+        if (viewingFriendPassportUuid != null) {
+            CompoundTag prof = data.knownProfiles.get(viewingFriendPassportUuid);
+            g.drawString(this.font, "ПАСПОРТ ДРУГА", winX + 14, winY + 10, 0xFFE0C068);
+            g.fill(winX + 12, winY + 24, winX + 330, winY + 25, 0xFF8F7A42);
+
+            if (prof == null || !prof.getBoolean("isLocked")) {
+                g.drawString(this.font, "Этот игрок еще не заполнил свой официальный паспорт.", winX + 15, winY + 45, 0xFFFF5555);
+                return;
+            }
+
+            int y = winY + 36;
+            int step = 20;
+            drawPassportRow(g, "Имя персонажа:", prof.getString("rpName"), winX + 15, y);
+            drawPassportRow(g, "Пол:", prof.getString("gender"), winX + 190, y);
+            drawPassportRow(g, "Возраст / ДР:", prof.getString("ageAndBirth"), winX + 15, y + step);
+            drawPassportRow(g, "Раса:", prof.getString("race"), winX + 190, y + step);
+            drawPassportRow(g, "Рост / Вес:", prof.getString("heightWeight"), winX + 15, y + step * 2);
+            drawPassportRow(g, "Волосы:", prof.getString("hair"), winX + 190, y + step * 2);
+            drawPassportRow(g, "Глаза:", prof.getString("eyes"), winX + 15, y + step * 3);
+            drawPassportRow(g, "Голос:", prof.getString("voice"), winX + 190, y + step * 3);
+            drawPassportRow(g, "Особенности внешности:", prof.getString("features"), winX + 15, y + step * 4 + 4);
+            drawPassportRow(g, "Дополнительно:", prof.getString("optional").isEmpty() ? "—" : prof.getString("optional"), winX + 15, y + step * 5 + 8);
+            return;
+        }
+
+        g.drawString(this.font, "СПИСОК ДРУЗЕЙ И КОНТАКТОВ", winX + 12, winY + 10, 0xFFE0C068);
+
+        int currentY = winY + 52;
+        List<String> reqs = new ArrayList<>(data.incomingRequests);
+        if (!reqs.isEmpty()) {
+            g.drawString(this.font, "Входящие запросы в друзья:", winX + 12, currentY - 10, 0xFF55FF55);
+            for (int i = 0; i < Math.min(2, reqs.size()); i++) {
+                String reqUuid = reqs.get(i);
+                CompoundTag prof = data.knownProfiles.get(reqUuid);
+                String name = prof != null ? prof.getString("rpName") + " (" + prof.getString("username") + ")" : "Неизвестный игрок";
+                int rowY = currentY + i * 24;
+                g.fill(winX + 12, rowY, winX + 202, rowY + 18, 0xFF1A241A);
+                g.renderOutline(winX + 12, rowY, 190, 18, 0xFF3A6A3A);
+                g.drawString(this.font, name, winX + 18, rowY + 5, 0xFFFFFFFF);
+            }
+            currentY += Math.min(2, reqs.size()) * 24 + 14;
+        } else {
+            currentY += 12;
+        }
+
+        g.fill(winX + 12, currentY - 8, winX + 330, currentY - 7, 0xFF3A3A3A);
+
+        List<String> friendList = new ArrayList<>(data.friends);
+        if (friendList.isEmpty()) {
+            g.drawString(this.font, "У вас пока нет добавленных друзей.", winX + 15, currentY + 10, 0xFF888888);
+            g.drawString(this.font, "Введите ник или РП-имя персонажа сверху и нажмите «+ Добавить».", winX + 15, currentY + 24, 0xFF666666);
+            return;
+        }
+
+        int perPage = 5;
+        int startIdx = friendsPage * perPage;
+        for (int i = 0; i < perPage && (startIdx + i) < friendList.size(); i++) {
+            String fUuid = friendList.get(startIdx + i);
+            CompoundTag prof = data.knownProfiles.get(fUuid);
+            String rpName = prof != null ? prof.getString("rpName") : "Игрок";
+            String username = prof != null ? prof.getString("username") : "";
+            boolean online = prof != null && prof.getBoolean("online");
+
+            int rowY = currentY + i * 32;
+            g.fill(winX + 12, rowY, winX + 330, rowY + 26, 0xFF151515);
+            g.renderOutline(winX + 12, rowY, 318, 26, online ? 0xFF2E5A2E : 0xFF2B2B2B);
+
+            // Индикатор сети + Имя
+            String statusDot = online ? "§a● " : "§7○ ";
+            g.drawString(this.font, statusDot + "§f" + rpName, winX + 18, rowY + 4, 0xFFFFFFFF);
+            g.drawString(this.font, (online ? "§aВ сети" : "§8Не в сети") + (username.isEmpty() ? "" : " §8(" + username + ")"), winX + 18, rowY + 14, 0xFF888888);
+        }
+    }
+
+    private void renderMessagesContent(GuiGraphics g, int winX, int winY) {
+        if (Minecraft.getInstance().player == null) return;
+        PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
+
+        g.drawString(this.font, "ЛИЧНЫЕ СООБЩЕНИЯ (МЕССЕНДЖЕР)", winX + 12, winY + 10, 0xFFE0C068);
+        g.fill(winX + 104, winY + 24, winX + 105, winY + ySize - 24, 0xFF3A3A3A);
+
+        if (activeChatFriendUuid == null) {
+            g.drawString(this.font, "Добавьте друга, чтобы начать переписку.", winX + 115, winY + 40, 0xFF888888);
+            return;
+        }
+
+        CompoundTag prof = data.knownProfiles.get(activeChatFriendUuid);
+        String chatPartnerName = prof != null ? prof.getString("rpName") : "Собеседник";
+        boolean online = prof != null && prof.getBoolean("online");
+
+        g.drawString(this.font, "Диалог: §e" + chatPartnerName + (online ? " §a(В сети)" : " §7(Не в сети)"), winX + 110, winY + 26, 0xFFFFFFFF);
+        g.fill(winX + 108, winY + 38, winX + 332, winY + ySize - 48, 0xFF0B0B0B);
+        g.renderOutline(winX + 108, winY + 38, 224, ySize - 86, 0xFF2B2B2B);
+
+        List<String> history = PassportNetworking.CLIENT_DM_HISTORY.getOrDefault(activeChatFriendUuid, List.of());
+        int maxLines = 11;
+        int start = Math.max(0, history.size() - maxLines);
+        int msgY = winY + 44;
+
+        for (int i = start; i < history.size(); i++) {
+            List<FormattedCharSequence> wrapped = this.font.split(Component.literal(history.get(i)), 214);
+            for (FormattedCharSequence line : wrapped) {
+                if (msgY < winY + ySize - 56) {
+                    g.drawString(this.font, line, winX + 113, msgY, 0xFFFFFFFF);
+                    msgY += 11;
+                }
             }
         }
     }
@@ -224,61 +485,56 @@ public class AmarthaloeMenuScreen extends Screen {
         if (Minecraft.getInstance().player == null) return;
         PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
 
-        g.drawString(this.font, "ВЕСЫ ЛИБРЫ: РЕПУТАЦИЯ В ИСОНОМИИ", winX + 12, winY + 10, 0xFFE0C068);
-        g.drawString(this.font, "Пороги рангов: ±10, ±50, ±100, ±500, ±1000", winX + 12, winY + 22, 0xFF888888);
+        g.drawString(this.font, "ВЕСЫ ЛИБРЫ: РЕПУТАЦИЯ В ИСОНОМИИ", winX + 12, winY + 8, 0xFFE0C068);
+        g.drawString(this.font, "Пороги рангов: ±10, ±50, ±100, ±500, ±1000", winX + 12, winY + 20, 0xFF888888);
 
         Faction current = Faction.values()[selectedFactionIdx];
         int rep = data.getRep(current);
         String title = current.getTitle(rep, data.isFemale());
         int[] bounds = current.getBracketBounds(rep);
 
-        // --- 1. ГЛАВНАЯ ШКАЛА ВЫБРАННОЙ ФРАКЦИИ (по эскизу) ---
         int barX = winX + 38;
-        int barY = winY + 42;
+        int barY = winY + 38;
         int barW = 266;
         int barH = 24;
 
-        // Внешний корпус шкалы с цветом выбранной фракции
         g.fill(barX, barY, barX + barW, barY + barH, 0xFF181818);
         int fillCol = rep < 0 ? 0xFF8B2626 : current.color;
 
-        // Расчет заполнения внутри текущего сегмента
         int minB = bounds[0];
         int maxB = bounds[1];
         float progress = Math.clamp((float)(rep - minB) / (float)(maxB - minB), 0.0f, 1.0f);
         int fillW = (int)(barW * progress);
 
-        // Полупрозрачная заливка прогресса + яркая полоса снизу
         g.fill(barX + 1, barY + 1, barX + fillW, barY + barH - 1, (fillCol & 0x00FFFFFF) | 0x66000000);
         g.fill(barX + 1, barY + barH - 3, barX + fillW, barY + barH - 1, fillCol);
 
-        // Золотисто-фракционная обводка самой капсулы
         g.renderOutline(barX, barY, barW, barH, current.color);
-        // Центральная засечка равновесия Либры
         g.fill(barX + barW / 2, barY, barX + barW / 2 + 1, barY + barH, 0x55FFFFFF);
 
-        // Название фракции крупно по центру внутри шкалы
         g.drawCenteredString(this.font, current.displayName, barX + barW / 2, barY + 8, 0xFFFFFFFF);
 
-        // Подписи под шкалой: Левый порог | Текущее число + Титул | Правый порог
         String leftLabel = (minB > 0 ? "+" : "") + minB;
         String rightLabel = (maxB > 0 ? "+" : "") + maxB;
         String centerLabel = (rep > 0 ? "+" : "") + rep + " " + title;
 
-        g.drawString(this.font, leftLabel, barX + 2, barY + barH + 5, 0xFFAAAAAA);
-        g.drawCenteredString(this.font, centerLabel, barX + barW / 2, barY + barH + 5, rep < 0 ? 0xFFFF6666 : current.color);
+        g.drawString(this.font, leftLabel, barX + 2, barY + barH + 4, 0xFFAAAAAA);
+        g.drawCenteredString(this.font, centerLabel, barX + barW / 2, barY + barH + 4, rep < 0 ? 0xFFFF6666 : current.color);
         int rWidth = this.font.width(rightLabel);
-        g.drawString(this.font, rightLabel, barX + barW - rWidth - 2, barY + barH + 5, 0xFFAAAAAA);
+        g.drawString(this.font, rightLabel, barX + barW - rWidth - 2, barY + barH + 4, 0xFFAAAAAA);
 
-        // Описание выбранной фракции
-        g.drawCenteredString(this.font, current.description, winX + 171, barY + barH + 19, 0xFF777777);
+        List<FormattedCharSequence> wrappedDesc = this.font.split(Component.literal(current.description), 310);
+        int descY = barY + barH + 16;
+        for (FormattedCharSequence line : wrappedDesc) {
+            int lineW = this.font.width(line);
+            g.drawString(this.font, line, winX + 171 - lineW / 2, descY, 0xFF888888);
+            descY += 10;
+        }
 
-        // Разделительная линия
-        g.fill(winX + 12, winY + 102, winX + 330, winY + 103, 0xFF3A3A3A);
-        g.drawString(this.font, "СВОДКА ПО ВСЕМ СТОРОНАМ ИСОНОМИИ:", winX + 12, winY + 110, 0xFFE0C068);
+        g.fill(winX + 12, winY + 104, winX + 330, winY + 105, 0xFF3A3A3A);
+        g.drawString(this.font, "СВОДКА ПО ВСЕМ СТОРОНАМ ИСОНОМИИ:", winX + 12, winY + 111, 0xFFE0C068);
 
-        // --- 2. ОБЗОР ВСЕХ 4 ФРАКЦИЙ ОДНОВРЕМЕННО ---
-        int listY = winY + 126;
+        int listY = winY + 125;
         int rowStep = 31;
         Faction[] all = Faction.values();
 
@@ -288,22 +544,18 @@ public class AmarthaloeMenuScreen extends Screen {
             String fTitle = f.getTitle(fRep, data.isFemale());
             int rowY = listY + i * rowStep;
 
-            // Рамка строки (подсвечивается, если эта фракция сейчас выбрана сверху)
             int boxBg = (i == selectedFactionIdx) ? 0xFF1D1A14 : 0xFF141414;
             int boxBorder = (i == selectedFactionIdx) ? f.color : 0xFF2B2B2B;
             g.fill(winX + 12, rowY, winX + 330, rowY + 26, boxBg);
             g.renderOutline(winX + 12, rowY, 318, 26, boxBorder);
 
-            // Цветной маркер фракции слева
             g.fill(winX + 14, rowY + 2, winX + 18, rowY + 24, f.color);
 
-            // Название и текущий ранг
             g.drawString(this.font, f.displayName, winX + 24, rowY + 4, 0xFFFFFFFF);
             String rankStr = (fRep > 0 ? "+" : "") + fRep + " • " + fTitle;
             int rankW = this.font.width(rankStr);
             g.drawString(this.font, rankStr, winX + 324 - rankW, rowY + 4, fRep < 0 ? 0xFFFF5555 : f.color);
 
-            // Мини-шкала от -1000 до +1000 с центром в 0
             int miniX = winX + 24;
             int miniY = rowY + 17;
             int miniW = 300;
@@ -317,7 +569,6 @@ public class AmarthaloeMenuScreen extends Screen {
             } else {
                 g.fill(centerMini - barLen, miniY, centerMini, miniY + 4, 0xFFAA2222);
             }
-            // Нулевая отметка посередине
             g.fill(centerMini, miniY - 1, centerMini + 1, miniY + 5, 0xFFFFFFFF);
         }
     }
@@ -389,7 +640,7 @@ public class AmarthaloeMenuScreen extends Screen {
             g.drawString(this.font, "Особенности внешности:", col1X, labelY + stepY * 4, 0xFFBBBBBB);
             g.drawString(this.font, "Дополнительно (по желанию):", col1X, labelY + stepY * 5, 0xFFBBBBBB);
         } else {
-            g.drawString(this.font, "Статус: УТВЕРЖДЕН (Смена через администрацию)", winX + 12, winY + 20, 0xFF55FF55);
+            g.drawString(this.font, "Статус: УТВЕРЖЕН (Смена через администрацию)", winX + 12, winY + 20, 0xFF55FF55);
             g.fill(winX + 12, winY + 33, winX + 330, winY + 34, 0xFF8F7A42);
 
             int y = winY + 44;
