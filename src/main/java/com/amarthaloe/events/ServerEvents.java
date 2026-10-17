@@ -8,6 +8,7 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.commands.arguments.EntityArgument;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket;
@@ -22,20 +23,36 @@ import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 import java.util.Arrays;
+import java.util.UUID;
 
 @EventBusSubscriber(modid = "amarthaloe", bus = EventBusSubscriber.Bus.GAME)
 public class ServerEvents {
+
+    public static void syncPlayerDataWithOnlineStatus(ServerPlayer sp) {
+        PassportData data = sp.getData(PassportData.PASSPORT);
+        // Обновляем статус онлайна и свежие паспорта всех друзей
+        for (String uuidStr : data.friends) {
+            try {
+                ServerPlayer friend = sp.server.getPlayerList().getPlayer(UUID.fromString(uuidStr));
+                if (friend != null) {
+                    PassportData fData = friend.getData(PassportData.PASSPORT);
+                    data.knownProfiles.put(uuidStr, fData.toProfileSnapshot(uuidStr, friend.getName().getString(), true));
+                } else if (data.knownProfiles.containsKey(uuidStr)) {
+                    data.knownProfiles.get(uuidStr).putBoolean("online", false);
+                }
+            } catch (Exception ignored) {}
+        }
+        sp.setData(PassportData.PASSPORT, data);
+        PacketDistributor.sendToPlayer(sp, new PassportNetworking.PassportPayload(data.serializeNBT(sp.registryAccess())));
+    }
 
     @SubscribeEvent
     public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer sp) {
             PassportData data = sp.getData(PassportData.PASSPORT);
-            PacketDistributor.sendToPlayer(sp, new PassportNetworking.PassportPayload(data.serializeNBT(sp.registryAccess())));
             sp.refreshDisplayName();
 
-            // Приветствие в зависимости от того, заполнен ли паспорт
             if (!data.isLocked) {
-                // ПЕРВЫЙ ВХОД / НОВИЧОК
                 sp.sendSystemMessage(Component.literal("§8§m======================================================"));
                 sp.sendSystemMessage(Component.literal("§6§l Добро пожаловать в Амарталоэ и суровую Исономию!"));
                 sp.sendSystemMessage(Component.literal("§7 Мир разделен на фракции, законы и контракты Либры."));
@@ -44,15 +61,52 @@ public class ServerEvents {
                 sp.sendSystemMessage(Component.literal("§7 Данные заполняются §lодин раз§7, после чего вступят в силу в чате."));
                 sp.sendSystemMessage(Component.literal("§8§m======================================================"));
 
-                // Крупное уведомление на экране для новичка
                 sp.connection.send(new ClientboundSetTitlesAnimationPacket(10, 100, 20));
                 sp.connection.send(new ClientboundSetTitleTextPacket(Component.literal("§6§lАМАРТАЛОЭ")));
                 sp.connection.send(new ClientboundSetSubtitleTextPacket(Component.literal("§eНажмите [M] и заполните паспорт!")));
                 sp.playNotifySound(SoundEvents.UI_TOAST_CHALLENGE_COMPLETE, SoundSource.MASTER, 0.9f, 0.8f);
             } else {
-                // ПОВТОРНЫЙ ВХОД / ЗАРЕГИСТРИРОВАННЫЙ ПЕРСОНАЖ
                 String displayName = data.rpName.isEmpty() ? sp.getName().getString() : data.rpName;
                 sp.sendSystemMessage(Component.literal("§6[Амарталоэ] §aДобро пожаловать в Амарталоэ, §e" + displayName + "§a!"));
+            }
+
+            syncPlayerDataWithOnlineStatus(sp);
+
+            // Уведомляем всех онлайн-друзей о входе игрока
+            String myName = data.rpName.isEmpty() ? sp.getName().getString() : data.rpName;
+            for (String friendUuid : data.friends) {
+                try {
+                    ServerPlayer onlineFriend = sp.server.getPlayerList().getPlayer(UUID.fromString(friendUuid));
+                    if (onlineFriend != null) {
+                        onlineFriend.sendSystemMessage(Component.literal("§6[Друзья] §a● Ваш друг §e" + myName + " §aвошел на сервер!"));
+                        onlineFriend.playNotifySound(SoundEvents.NOTE_BLOCK_BELL.value(), SoundSource.MASTER, 0.7f, 1.2f);
+                        syncPlayerDataWithOnlineStatus(onlineFriend);
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public static void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
+        if (event.getEntity() instanceof ServerPlayer sp) {
+            PassportData data = sp.getData(PassportData.PASSPORT);
+            String myName = data.rpName.isEmpty() ? sp.getName().getString() : data.rpName;
+            String myUuid = sp.getStringUUID();
+
+            for (String friendUuid : data.friends) {
+                try {
+                    ServerPlayer onlineFriend = sp.server.getPlayerList().getPlayer(UUID.fromString(friendUuid));
+                    if (onlineFriend != null) {
+                        onlineFriend.sendSystemMessage(Component.literal("§6[Друзья] §7○ Ваш друг §e" + myName + " §7покинул сервер."));
+                        PassportData fData = onlineFriend.getData(PassportData.PASSPORT);
+                        if (fData.knownProfiles.containsKey(myUuid)) {
+                            fData.knownProfiles.get(myUuid).putBoolean("online", false);
+                        }
+                        onlineFriend.setData(PassportData.PASSPORT, fData);
+                        PacketDistributor.sendToPlayer(onlineFriend, new PassportNetworking.PassportPayload(fData.serializeNBT(onlineFriend.registryAccess())));
+                    }
+                } catch (Exception ignored) {}
             }
         }
     }
@@ -60,8 +114,7 @@ public class ServerEvents {
     @SubscribeEvent
     public static void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
         if (event.getEntity() instanceof ServerPlayer sp) {
-            PassportData data = sp.getData(PassportData.PASSPORT);
-            PacketDistributor.sendToPlayer(sp, new PassportNetworking.PassportPayload(data.serializeNBT(sp.registryAccess())));
+            syncPlayerDataWithOnlineStatus(sp);
             sp.refreshDisplayName();
         }
     }
@@ -96,7 +149,7 @@ public class ServerEvents {
                             data.isLocked = false;
                             target.setData(PassportData.PASSPORT, data);
                             target.refreshDisplayName();
-                            PacketDistributor.sendToPlayer(target, new PassportNetworking.PassportPayload(data.serializeNBT(target.registryAccess())));
+                            syncPlayerDataWithOnlineStatus(target);
                             ctx.getSource().sendSuccess(() -> Component.literal("§aПаспорт игрока " + target.getName().getString() + " разблокирован!"), true);
                             return 1;
                         })
@@ -165,7 +218,7 @@ public class ServerEvents {
         data.setRep(f, newVal);
         target.setData(PassportData.PASSPORT, data);
         target.refreshDisplayName();
-        PacketDistributor.sendToPlayer(target, new PassportNetworking.PassportPayload(data.serializeNBT(target.registryAccess())));
+        syncPlayerDataWithOnlineStatus(target);
 
         String title = f.getTitle(newVal, data.isFemale());
         source.sendSuccess(() -> Component.literal("§6[Весы Либры] §fРепутация §e" + target.getName().getString() + " §fс фракцией «" + f.displayName + "» теперь: §b" + newVal + " §7(" + title + ")"), true);
