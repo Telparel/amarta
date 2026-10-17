@@ -26,15 +26,16 @@ public class PassportData implements INBTSerializable<CompoundTag> {
     public String features = "";
     public String voice = "";
     public String optional = "";
+    public String photoId = ""; // ID фотографии паспорта и аватарки
 
     public final Map<Faction, Integer> reputation = new EnumMap<>(Faction.class);
     public String activeTitleFaction = "";
 
-    // Система друзей (храним UUID в виде строк)
     public final Set<String> friends = new HashSet<>();
     public final Set<String> incomingRequests = new HashSet<>();
-    // Кэш имен и паспортов друзей (UUID -> CompoundTag с именем, ником и паспортом)
     public final Map<String, CompoundTag> knownProfiles = new HashMap<>();
+    // Синхронизируемые групповые чаты игрока (groupId -> CompoundTag с названием, аватаркой и участниками)
+    public final Map<String, CompoundTag> groupChats = new LinkedHashMap<>();
 
     public PassportData() {
         for (Faction f : Faction.values()) {
@@ -70,6 +71,7 @@ public class PassportData implements INBTSerializable<CompoundTag> {
         snap.putString("features", features);
         snap.putString("voice", voice);
         snap.putString("optional", optional);
+        snap.putString("photoId", photoId);
         return snap;
     }
 
@@ -87,6 +89,7 @@ public class PassportData implements INBTSerializable<CompoundTag> {
         tag.putString("features", features);
         tag.putString("voice", voice);
         tag.putString("optional", optional);
+        tag.putString("photoId", photoId);
         tag.putString("activeTitleFaction", activeTitleFaction);
 
         CompoundTag repTag = new CompoundTag();
@@ -109,6 +112,12 @@ public class PassportData implements INBTSerializable<CompoundTag> {
         }
         tag.put("knownProfiles", profilesTag);
 
+        CompoundTag groupsTag = new CompoundTag();
+        for (Map.Entry<String, CompoundTag> entry : groupChats.entrySet()) {
+            groupsTag.put(entry.getKey(), entry.getValue());
+        }
+        tag.put("groupChats", groupsTag);
+
         return tag;
     }
 
@@ -125,6 +134,7 @@ public class PassportData implements INBTSerializable<CompoundTag> {
         features = tag.getString("features");
         voice = tag.getString("voice");
         optional = tag.getString("optional");
+        photoId = tag.getString("photoId");
         activeTitleFaction = tag.getString("activeTitleFaction");
 
         if (tag.contains("reputation")) {
@@ -151,6 +161,14 @@ public class PassportData implements INBTSerializable<CompoundTag> {
             CompoundTag profilesTag = tag.getCompound("knownProfiles");
             for (String key : profilesTag.getAllKeys()) {
                 knownProfiles.put(key, profilesTag.getCompound(key));
+            }
+        }
+
+        groupChats.clear();
+        if (tag.contains("groupChats")) {
+            CompoundTag groupsTag = tag.getCompound("groupChats");
+            for (String key : groupsTag.getAllKeys()) {
+                groupChats.put(key, groupsTag.getCompound(key));
             }
         }
     }
