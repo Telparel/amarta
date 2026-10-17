@@ -30,8 +30,8 @@ public class ServerEvents {
 
     public static void syncPlayerDataWithOnlineStatus(ServerPlayer sp) {
         PassportData data = sp.getData(PassportData.PASSPORT);
-        // Обновляем статус онлайна и свежие паспорта всех друзей
         for (String uuidStr : data.friends) {
+            if (uuidStr.startsWith("bot-")) continue; // Статус ботов не сбрасываем
             try {
                 ServerPlayer friend = sp.server.getPlayerList().getPlayer(UUID.fromString(uuidStr));
                 if (friend != null) {
@@ -72,9 +72,9 @@ public class ServerEvents {
 
             syncPlayerDataWithOnlineStatus(sp);
 
-            // Уведомляем всех онлайн-друзей о входе игрока
             String myName = data.rpName.isEmpty() ? sp.getName().getString() : data.rpName;
             for (String friendUuid : data.friends) {
+                if (friendUuid.startsWith("bot-")) continue;
                 try {
                     ServerPlayer onlineFriend = sp.server.getPlayerList().getPlayer(UUID.fromString(friendUuid));
                     if (onlineFriend != null) {
@@ -95,6 +95,7 @@ public class ServerEvents {
             String myUuid = sp.getStringUUID();
 
             for (String friendUuid : data.friends) {
+                if (friendUuid.startsWith("bot-")) continue;
                 try {
                     ServerPlayer onlineFriend = sp.server.getPlayerList().getPlayer(UUID.fromString(friendUuid));
                     if (onlineFriend != null) {
@@ -138,6 +139,7 @@ public class ServerEvents {
 
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
+        // 1. Команды паспорта
         event.getDispatcher().register(
             Commands.literal("passport")
                 .then(Commands.literal("reset")
@@ -172,6 +174,7 @@ public class ServerEvents {
                 )
         );
 
+        // 2. Команды репутации
         event.getDispatcher().register(
             Commands.literal("rep")
                 .requires(source -> source.hasPermission(2))
@@ -198,6 +201,139 @@ public class ServerEvents {
                             )
                         )
                     )
+                )
+        );
+
+        // 3. ТЕСТОВЫЙ СИМУЛЯТОР ДЛЯ ДРУЗЕЙ И МЕССЕНДЖЕРА (/socialtest)
+        event.getDispatcher().register(
+            Commands.literal("socialtest")
+                // Симулировать входящую заявку в друзья
+                .then(Commands.literal("request")
+                    .executes(ctx -> {
+                        ServerPlayer sp = ctx.getSource().getPlayerOrException();
+                        PassportData data = sp.getData(PassportData.PASSPORT);
+
+                        String botId = "bot-viktor";
+                        PassportData fakePass = new PassportData();
+                        fakePass.isLocked = true;
+                        fakePass.rpName = "Виктор Градов";
+                        fakePass.gender = "Мужской";
+                        fakePass.ageAndBirth = "34 года, 12 ноября";
+                        fakePass.race = "Человек";
+                        fakePass.heightWeight = "182 см / 79 кг";
+                        fakePass.hair = "Русые, с проседью";
+                        fakePass.eyes = "Карие, усталые";
+                        fakePass.features = "Ожог на левом запястье, очки в роговой оправе";
+                        fakePass.voice = "Хриплый тенор";
+                        fakePass.optional = "Старший смены теплоузла Блока-7";
+
+                        data.incomingRequests.add(botId);
+                        data.knownProfiles.put(botId, fakePass.toProfileSnapshot(botId, "Viktor_B7", true));
+                        syncPlayerDataWithOnlineStatus(sp);
+
+                        sp.sendSystemMessage(Component.literal("§6[Друзья] §eВиктор Градов §fхочет добавить вас в друзья! Откройте меню §b[M] -> ДРУЗЬЯ§f, чтобы принять."));
+                        sp.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.8f, 1.2f);
+                        return 1;
+                    })
+                )
+                // Сразу добавить двух готовых друзей (онлайн и оффлайн) с паспортами
+                .then(Commands.literal("addbot")
+                    .executes(ctx -> {
+                        ServerPlayer sp = ctx.getSource().getPlayerOrException();
+                        PassportData data = sp.getData(PassportData.PASSPORT);
+
+                        // Друг 1: В сети
+                        String bot1 = "bot-marfa";
+                        PassportData p1 = new PassportData();
+                        p1.isLocked = true;
+                        p1.rpName = "Марфа Соколова";
+                        p1.gender = "Женский";
+                        p1.ageAndBirth = "26 лет, 3 мая";
+                        p1.race = "Человек";
+                        p1.heightWeight = "168 см / 57 кг";
+                        p1.hair = "Рыжие, собраны в пучок";
+                        p1.eyes = "Зеленые";
+                        p1.features = "Чернильные пятна на пальцах, значок НИИ";
+                        p1.voice = "Мягкое сопрано";
+                        p1.optional = "Архивариус сектора Интеллигенции";
+
+                        // Друг 2: Не в сети
+                        String bot2 = "bot-inspector";
+                        PassportData p2 = new PassportData();
+                        p2.isLocked = true;
+                        p2.rpName = "Август Вейн";
+                        p2.gender = "Мужской";
+                        p2.ageAndBirth = "41 год, 20 января";
+                        p2.race = "Человек";
+                        p2.heightWeight = "190 см / 85 кг";
+                        p2.hair = "Черные, гладко зачесаны";
+                        p2.eyes = "Холодные серые";
+                        p2.features = "Безупречная выправка, серебряный перстень Либры";
+                        p2.voice = "Сухой, металлический баритон";
+                        p2.optional = "Ревизор Контрактов Правительства";
+
+                        data.friends.add(bot1);
+                        data.friends.add(bot2);
+                        data.knownProfiles.put(bot1, p1.toProfileSnapshot(bot1, "Marfa_NII", true));
+                        data.knownProfiles.put(bot2, p2.toProfileSnapshot(bot2, "Inspector_V", false));
+                        syncPlayerDataWithOnlineStatus(sp);
+
+                        sp.sendSystemMessage(Component.literal("§6[Тест] §aДобавлены 2 тестовых друга: §eМарфа Соколова §a(В сети) и §eАвгуст Вейн §7(Не в сети). Откройте §b[M] -> ДРУЗЬЯ§a!"));
+                        return 1;
+                    })
+                )
+                // Симулировать входящее сообщение в Мессенджер
+                .then(Commands.literal("msg")
+                    .executes(ctx -> {
+                        ServerPlayer sp = ctx.getSource().getPlayerOrException();
+                        PassportData data = sp.getData(PassportData.PASSPORT);
+
+                        String senderBot = data.friends.isEmpty() ? "bot-marfa" : data.friends.iterator().next();
+                        CompoundTag prof = data.knownProfiles.get(senderBot);
+                        String botName = prof != null ? prof.getString("rpName") : "Марфа Соколова";
+
+                        String text = "§e" + botName + ": §fТоварищ, ревизоры Либры проверяют пропуска у 4-го энергоблока! Будь осторожнее.";
+                        PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("RECEIVE_DM", senderBot, text));
+
+                        sp.sendSystemMessage(Component.literal("§6[ЛС от §e" + botName + "§6] §fТоварищ, ревизоры Либры проверяют пропуска у 4-го энергоблока!"));
+                        sp.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.7f, 1.4f);
+                        return 1;
+                    })
+                )
+                // Переключить статус В сети / Не в сети у всех тестовых друзей
+                .then(Commands.literal("toggle")
+                    .executes(ctx -> {
+                        ServerPlayer sp = ctx.getSource().getPlayerOrException();
+                        PassportData data = sp.getData(PassportData.PASSPORT);
+                        for (String fUuid : data.friends) {
+                            CompoundTag prof = data.knownProfiles.get(fUuid);
+                            if (prof != null) {
+                                boolean nowOnline = !prof.getBoolean("online");
+                                prof.putBoolean("online", nowOnline);
+                                String name = prof.getString("rpName");
+                                if (nowOnline) {
+                                    sp.sendSystemMessage(Component.literal("§6[Друзья] §a● Ваш друг §e" + name + " §aвошел на сервер!"));
+                                    sp.playNotifySound(SoundEvents.NOTE_BLOCK_BELL.value(), SoundSource.MASTER, 0.7f, 1.2f);
+                                } else {
+                                    sp.sendSystemMessage(Component.literal("§6[Друзья] §7○ Ваш друг §e" + name + " §7покинул сервер."));
+                                }
+                            }
+                        }
+                        syncPlayerDataWithOnlineStatus(sp);
+                        return 1;
+                    })
+                )
+                // Очистить всех тестовых друзей
+                .then(Commands.literal("clear")
+                    .executes(ctx -> {
+                        ServerPlayer sp = ctx.getSource().getPlayerOrException();
+                        PassportData data = sp.getData(PassportData.PASSPORT);
+                        data.friends.removeIf(id -> id.startsWith("bot-"));
+                        data.incomingRequests.removeIf(id -> id.startsWith("bot-"));
+                        syncPlayerDataWithOnlineStatus(sp);
+                        sp.sendSystemMessage(Component.literal("§6[Тест] §eВсе тестовые боты удалены из списка друзей."));
+                        return 1;
+                    })
                 )
         );
     }
