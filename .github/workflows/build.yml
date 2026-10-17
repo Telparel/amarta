@@ -1,0 +1,30 @@
+name: Build JAR
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Берем наши файлы
+        uses: actions/checkout@v4
+
+      - name: Ставим Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Собираем мод
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.8'
+          arguments: build
+
+      - name: Отдаем готовый .jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: Amarthaloe-Mod
+          path: build/libs/*.jar
