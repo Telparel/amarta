@@ -1,0 +1,17 @@
+plugins {
+    id 'java'
+    id 'net.neoforged.moddev' version '2.0.28-beta'
+}
+
+version = '0.1.0'
+group = 'com.amarthaloe'
+
+base {
+    archivesName = 'amarthaloe'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+neoForge {
+    version = "21.1.72"
+}
