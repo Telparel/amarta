@@ -1,5 +1,6 @@
 package com.amarthaloe.events;
 
+import com.amarthaloe.data.OfflineMailStorage;
 import com.amarthaloe.data.PassportData;
 import com.amarthaloe.network.PassportNetworking;
 import com.amarthaloe.rpg.Faction;
@@ -23,6 +24,8 @@ import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @EventBusSubscriber(modid = "amarthaloe", bus = EventBusSubscriber.Bus.GAME)
@@ -31,7 +34,7 @@ public class ServerEvents {
     public static void syncPlayerDataWithOnlineStatus(ServerPlayer sp) {
         PassportData data = sp.getData(PassportData.PASSPORT);
         for (String uuidStr : data.friends) {
-            if (uuidStr.startsWith("bot-")) continue; // Статус ботов не сбрасываем
+            if (uuidStr.startsWith("bot-")) continue;
             try {
                 ServerPlayer friend = sp.server.getPlayerList().getPlayer(UUID.fromString(uuidStr));
                 if (friend != null) {
@@ -44,6 +47,36 @@ public class ServerEvents {
         }
         sp.setData(PassportData.PASSPORT, data);
         PacketDistributor.sendToPlayer(sp, new PassportNetworking.PassportPayload(data.serializeNBT(sp.registryAccess())));
+    }
+
+    public static void syncMailAndNotifyUnread(ServerPlayer sp) {
+        PassportData data = sp.getData(PassportData.PASSPORT);
+        OfflineMailStorage mail = OfflineMailStorage.get(sp.server);
+        String myUuid = sp.getStringUUID();
+
+        // Отправляем клиенту сохраненную историю переписок по всем друзьям
+        for (String friendUuid : data.friends) {
+            PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("CLEAR_HISTORY", friendUuid, ""));
+            List<String> history = mail.getHistory(myUuid, friendUuid);
+            for (String line : history) {
+                PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("RECEIVE_DM", friendUuid, line));
+            }
+        }
+
+        // Синхронизируем счетчики непрочитанных сообщений
+        Map<String, Integer> unreadMap = mail.getUnreadForPlayer(myUuid);
+        for (Map.Entry<String, Integer> entry : unreadMap.entrySet()) {
+            PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("SET_UNREAD", entry.getKey(), String.valueOf(entry.getValue())));
+        }
+
+        int totalUnread = mail.getTotalUnread(myUuid);
+        if (totalUnread > 0) {
+            sp.sendSystemMessage(Component.literal("§8§m------------------------------------------------------"));
+            sp.sendSystemMessage(Component.literal("§6✉ [Почта Исономии] §eУ вас §c§l" + totalUnread + " §eнепрочитанных сообщений, полученных пока вы были не в сети!"));
+            sp.sendSystemMessage(Component.literal("§7Откройте меню §b[M] -> СООБЩЕНИЯ§7, чтобы прочитать их."));
+            sp.sendSystemMessage(Component.literal("§8§m------------------------------------------------------"));
+            sp.playNotifySound(SoundEvents.NOTE_BLOCK_CHIME.value(), SoundSource.MASTER, 1.0f, 1.1f);
+        }
     }
 
     @SubscribeEvent
@@ -71,6 +104,7 @@ public class ServerEvents {
             }
 
             syncPlayerDataWithOnlineStatus(sp);
+            syncMailAndNotifyUnread(sp);
 
             String myName = data.rpName.isEmpty() ? sp.getName().getString() : data.rpName;
             for (String friendUuid : data.friends) {
@@ -139,7 +173,6 @@ public class ServerEvents {
 
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
-        // 1. Команды паспорта
         event.getDispatcher().register(
             Commands.literal("passport")
                 .then(Commands.literal("reset")
@@ -174,7 +207,6 @@ public class ServerEvents {
                 )
         );
 
-        // 2. Команды репутации
         event.getDispatcher().register(
             Commands.literal("rep")
                 .requires(source -> source.hasPermission(2))
@@ -204,10 +236,8 @@ public class ServerEvents {
                 )
         );
 
-        // 3. ТЕСТОВЫЙ СИМУЛЯТОР ДЛЯ ДРУЗЕЙ И МЕССЕНДЖЕРА (/socialtest)
         event.getDispatcher().register(
             Commands.literal("socialtest")
-                // Симулировать входящую заявку в друзья
                 .then(Commands.literal("request")
                     .executes(ctx -> {
                         ServerPlayer sp = ctx.getSource().getPlayerOrException();
@@ -236,13 +266,11 @@ public class ServerEvents {
                         return 1;
                     })
                 )
-                // Сразу добавить двух готовых друзей (онлайн и оффлайн) с паспортами
                 .then(Commands.literal("addbot")
                     .executes(ctx -> {
                         ServerPlayer sp = ctx.getSource().getPlayerOrException();
                         PassportData data = sp.getData(PassportData.PASSPORT);
 
-                        // Друг 1: В сети
                         String bot1 = "bot-marfa";
                         PassportData p1 = new PassportData();
                         p1.isLocked = true;
@@ -257,7 +285,6 @@ public class ServerEvents {
                         p1.voice = "Мягкое сопрано";
                         p1.optional = "Архивариус сектора Интеллигенции";
 
-                        // Друг 2: Не в сети
                         String bot2 = "bot-inspector";
                         PassportData p2 = new PassportData();
                         p2.isLocked = true;
@@ -282,7 +309,6 @@ public class ServerEvents {
                         return 1;
                     })
                 )
-                // Симулировать входящее сообщение в Мессенджер
                 .then(Commands.literal("msg")
                     .executes(ctx -> {
                         ServerPlayer sp = ctx.getSource().getPlayerOrException();
@@ -293,14 +319,27 @@ public class ServerEvents {
                         String botName = prof != null ? prof.getString("rpName") : "Марфа Соколова";
 
                         String text = "§e" + botName + ": §fТоварищ, ревизоры Либры проверяют пропуска у 4-го энергоблока! Будь осторожнее.";
-                        PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("RECEIVE_DM", senderBot, text));
-
-                        sp.sendSystemMessage(Component.literal("§6[ЛС от §e" + botName + "§6] §fТоварищ, ревизоры Либры проверяют пропуска у 4-го энергоблока!"));
-                        sp.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.7f, 1.4f);
+                        OfflineMailStorage.get(sp.server).addMessage(senderBot, sp.getStringUUID(), text, false);
+                        syncMailAndNotifyUnread(sp);
                         return 1;
                     })
                 )
-                // Переключить статус В сети / Не в сети у всех тестовых друзей
+                // Симуляция получения оффлайн-сообщений и входа на сервер
+                .then(Commands.literal("offlinemsg")
+                    .executes(ctx -> {
+                        ServerPlayer sp = ctx.getSource().getPlayerOrException();
+                        PassportData data = sp.getData(PassportData.PASSPORT);
+                        if (!data.friends.contains("bot-inspector")) {
+                            sp.sendSystemMessage(Component.literal("§cСначала добавьте тестовых ботов командой /socialtest addbot"));
+                            return 0;
+                        }
+                        OfflineMailStorage mail = OfflineMailStorage.get(sp.server);
+                        mail.addMessage("bot-inspector", sp.getStringUUID(), "§eАвгуст Вейн: §fГражданин, вы отсутствовали на проверке.", false);
+                        mail.addMessage("bot-inspector", sp.getStringUUID(), "§eАвгуст Вейн: §fЯвитесь в канцелярию Наместников Либры.", false);
+                        syncMailAndNotifyUnread(sp);
+                        return 1;
+                    })
+                )
                 .then(Commands.literal("toggle")
                     .executes(ctx -> {
                         ServerPlayer sp = ctx.getSource().getPlayerOrException();
@@ -323,7 +362,6 @@ public class ServerEvents {
                         return 1;
                     })
                 )
-                // Очистить всех тестовых друзей
                 .then(Commands.literal("clear")
                     .executes(ctx -> {
                         ServerPlayer sp = ctx.getSource().getPlayerOrException();
