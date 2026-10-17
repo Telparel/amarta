@@ -45,10 +45,19 @@ public class AmarthaloeMenuScreen extends Screen {
     private String pendingGroupAvatarId = "";
     private int friendsPage = 0;
 
+    // Прокрутка (скроллбар) мессенджера и списка контактов
+    private float chatScrollOffset = 0.0f; // 0 = самый низ (новые сообщения), >0 = сдвиг вверх к старым
+    private int maxChatScroll = 0;
+    private boolean isDraggingChatScrollbar = false;
+    private int contactListOffset = 0;
+
     // Полноэкранный просмотр фотографии по клику (Лайтбокс)
     private String zoomedImageId = null;
     private record ClickableImageArea(int x, int y, int w, int h, String imageId) {}
     private final List<ClickableImageArea> clickableImages = new ArrayList<>();
+
+    // Внутренняя структура элемента ленты чата (текстовая строка или фото)
+    private record ChatRenderLine(boolean isImage, FormattedCharSequence text, String imageId, int height) {}
 
     public AmarthaloeMenuScreen() {
         super(Component.literal("Amarthaloe Menu"));
@@ -169,6 +178,7 @@ public class AmarthaloeMenuScreen extends Screen {
             });
             DarkButton dmBtn = new DarkButton(winX + 199, rowY + 4, 34, 18, Component.literal("ЛС"), (b) -> {
                 this.activeChatFriendUuid = fUuid;
+                this.chatScrollOffset = 0.0f;
                 this.currentTab = "СООБЩЕНИЯ";
                 this.rebuildWidgets();
             });
@@ -194,7 +204,6 @@ public class AmarthaloeMenuScreen extends Screen {
         int winX = leftPos + 110;
         int winY = topPos + 8;
 
-        // Кнопка создания группового чата сверху над контактами
         DarkButton newGroupBtn = new DarkButton(winX + 8, winY + 24, 92, 18, Component.literal("+ Создать беседу"), (b) -> {
             creatingGroupMode = !creatingGroupMode;
             this.rebuildWidgets();
@@ -225,7 +234,6 @@ public class AmarthaloeMenuScreen extends Screen {
             return;
         }
 
-        // Собираем единый список контактов: сначала групповые чаты, затем друзья
         List<String> contactIds = new ArrayList<>();
         contactIds.addAll(data.groupChats.keySet());
         contactIds.addAll(data.friends);
@@ -239,8 +247,13 @@ public class AmarthaloeMenuScreen extends Screen {
             PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("MARK_READ", activeChatFriendUuid, ""));
         }
 
-        for (int i = 0; i < Math.min(8, contactIds.size()); i++) {
-            String cId = contactIds.get(i);
+        int maxVisibleContacts = 8;
+        if (contactListOffset > Math.max(0, contactIds.size() - maxVisibleContacts)) {
+            contactListOffset = Math.max(0, contactIds.size() - maxVisibleContacts);
+        }
+
+        for (int i = 0; i < maxVisibleContacts && (contactListOffset + i) < contactIds.size(); i++) {
+            String cId = contactIds.get(contactListOffset + i);
             String name;
             if (cId.startsWith("group_")) {
                 CompoundTag gTag = data.groupChats.get(cId);
@@ -254,9 +267,9 @@ public class AmarthaloeMenuScreen extends Screen {
             if (name.length() > 9) name = name.substring(0, 9) + ".";
             if (unread > 0) name = name + " §c+" + unread;
 
-            // Оставляем слева 16 пикселей под мини-аватарку (кнопка шириной 74 на X = winX + 26)
             DarkButton contactBtn = new DarkButton(winX + 26, winY + 46 + i * 24, 74, 20, Component.literal(name), (b) -> {
                 activeChatFriendUuid = cId;
+                chatScrollOffset = 0.0f; // При переключении диалога сбрасываем скролл в самый низ
                 PassportNetworking.CLIENT_UNREAD_COUNTS.remove(cId);
                 PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("MARK_READ", cId, ""));
                 this.rebuildWidgets();
@@ -266,7 +279,6 @@ public class AmarthaloeMenuScreen extends Screen {
         }
 
         if (activeChatFriendUuid != null) {
-            // Если это групповой чат — сверху справа поле добавления участника
             if (activeChatFriendUuid.startsWith("group_")) {
                 inviteGroupMemberBox = createField(winX + 215, winY + 22, 78, 15, "", 32, "Ник/Имя...");
                 DarkButton addMemberBtn = new DarkButton(winX + 295, winY + 22, 37, 15, Component.literal("+Уч."), (b) -> {
@@ -279,16 +291,17 @@ public class AmarthaloeMenuScreen extends Screen {
                 this.addRenderableWidget(addMemberBtn);
             }
 
-            // Поле ввода текста + Кнопка [📷] (прикрепить фото до 2 МБ) + Кнопка [Отпр.]
             chatInputBox = createField(winX + 108, winY + ySize - 42, 138, 18, "", 120, "Сообщение...");
             DarkButton sendPhotoBtn = new DarkButton(winX + 249, winY + ySize - 42, 26, 18, Component.literal("📷"), (b) -> {
                 ClientImageManager.pickImageFromDisk((imgId, bytes) -> {
+                    chatScrollOffset = 0.0f;
                     PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("SEND_DM", activeChatFriendUuid, "[IMG:" + imgId + "]"));
                 });
             });
             DarkButton sendBtn = new DarkButton(winX + 278, winY + ySize - 42, 54, 18, Component.literal("Отпр."), (b) -> {
                 String msg = chatInputBox.getValue().trim();
                 if (!msg.isEmpty()) {
+                    chatScrollOffset = 0.0f;
                     PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("SEND_DM", activeChatFriendUuid, msg));
                     chatInputBox.setValue("");
                 }
@@ -380,7 +393,6 @@ public class AmarthaloeMenuScreen extends Screen {
         featuresBox = createField(col1X, startY + stepY * 4, fullW, fieldH, data.features, 80, "Шрам над бровью, легкая хромота...");
         optionalBox = createField(col1X, startY + stepY * 5, fullW, fieldH, data.optional, 80, "Любая деталь по желанию (необязательно)");
 
-        // Кнопка загрузки фото персонажа (один раз при заполнении паспорта)
         uploadPhotoBtn = new DarkButton(col1X, topPos + ySize - 32, 118, 20,
                 Component.literal(pendingPassportPhotoId.isEmpty() ? "📷 Фото (до 2 МБ)" : "✔ Фото выбрано"), (btn) -> {
             ClientImageManager.pickImageFromDisk((imgId, bytes) -> {
@@ -462,7 +474,6 @@ public class AmarthaloeMenuScreen extends Screen {
             }
         }
 
-        // Если игрок кликнул на фотографию — рисуем полноэкранное увеличение поверх всего!
         if (zoomedImageId != null) {
             guiGraphics.pose().pushPose();
             guiGraphics.pose().translate(0, 0, 400);
@@ -493,6 +504,21 @@ public class AmarthaloeMenuScreen extends Screen {
             zoomedImageId = null;
             return true;
         }
+
+        // Проверяем клик по ползунку прокрутки чата
+        if ("СООБЩЕНИЯ".equals(currentTab) && !creatingGroupMode && activeChatFriendUuid != null && maxChatScroll > 0) {
+            int winX = leftPos + 110;
+            int winY = topPos + 8;
+            int scrollX = winX + 324;
+            int boxY = winY + 40;
+            int boxH = ySize - 88;
+            if (mouseX >= scrollX && mouseX <= scrollX + 8 && mouseY >= boxY && mouseY <= boxY + boxH) {
+                isDraggingChatScrollbar = true;
+                updateScrollFromMouse(mouseY, boxY, boxH);
+                return true;
+            }
+        }
+
         for (ClickableImageArea area : clickableImages) {
             if (mouseX >= area.x && mouseX <= area.x + area.w && mouseY >= area.y && mouseY <= area.y + area.h) {
                 if (area.imageId != null && !area.imageId.isEmpty()) {
@@ -502,6 +528,63 @@ public class AmarthaloeMenuScreen extends Screen {
             }
         }
         return super.mouseClicked(mouseX, mouseY, button);
+    }
+
+    @Override
+    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+        isDraggingChatScrollbar = false;
+        return super.mouseReleased(mouseX, mouseY, button);
+    }
+
+    @Override
+    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
+        if (isDraggingChatScrollbar && maxChatScroll > 0) {
+            int winY = topPos + 8;
+            int boxY = winY + 40;
+            int boxH = ySize - 88;
+            updateScrollFromMouse(mouseY, boxY, boxH);
+            return true;
+        }
+        return super.mouseDragged(mouseX, mouseY, button, dragX, dragY);
+    }
+
+    private void updateScrollFromMouse(double mouseY, int boxY, int boxH) {
+        int thumbH = Math.max(18, (int) ((float) boxH / (boxH + maxChatScroll) * boxH));
+        int trackH = Math.max(1, boxH - thumbH);
+        float ratioFromTop = (float) Math.clamp((mouseY - boxY - thumbH / 2.0) / trackH, 0.0, 1.0);
+        // Вверху (ratio=0) показываем самые старые (chatScrollOffset = maxChatScroll), внизу (ratio=1) — новые (0)
+        this.chatScrollOffset = (1.0f - ratioFromTop) * maxChatScroll;
+    }
+
+    @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        if ("СООБЩЕНИЯ".equals(currentTab) && !creatingGroupMode) {
+            int winX = leftPos + 110;
+            int winY = topPos + 8;
+
+            // Если курсор над лентой сообщений — крутим историю переписки!
+            if (mouseX >= winX + 108 && mouseX <= winX + 332 && mouseY >= winY + 40 && mouseY <= winY + ySize - 48) {
+                if (maxChatScroll > 0) {
+                    chatScrollOffset = Math.clamp(chatScrollOffset + (float) (scrollY * 18.0f), 0.0f, (float) maxChatScroll);
+                    return true;
+                }
+            }
+            // Если курсор над левой колонкой контактов/групп — крутим список контактов!
+            if (mouseX >= winX + 6 && mouseX <= winX + 104 && mouseY >= winY + 44 && mouseY <= winY + ySize - 16) {
+                if (Minecraft.getInstance().player != null) {
+                    PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
+                    int totalContacts = data.groupChats.size() + data.friends.size();
+                    int maxOffset = Math.max(0, totalContacts - 8);
+                    int newOffset = Math.clamp(contactListOffset - (int) Math.signum(scrollY), 0, maxOffset);
+                    if (newOffset != contactListOffset) {
+                        contactListOffset = newOffset;
+                        this.rebuildWidgets();
+                    }
+                    return true;
+                }
+            }
+        }
+        return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
     }
 
     private void renderAvatarBox(GuiGraphics g, String photoId, int x, int y, int size, boolean clickable) {
@@ -518,7 +601,6 @@ public class AmarthaloeMenuScreen extends Screen {
     private void renderApprovedPassportSheet(GuiGraphics g, int winX, int winY, String rpName, String gender,
                                              String ageAndBirth, String race, String heightWeight, String hair,
                                              String eyes, String features, String voice, String optional, String photoId) {
-        // Портретная рамка фотографии слева (68x86), кликабельная для увеличения
         int photoX = winX + 14;
         int photoY = winY + 42;
         int photoW = 68;
@@ -535,7 +617,6 @@ public class AmarthaloeMenuScreen extends Screen {
             g.drawCenteredString(this.font, "Нет фото", photoX + photoW / 2, photoY + 38, 0xFF555555);
         }
 
-        // Данные справа от фотографии
         int textX1 = winX + 90;
         int textX2 = winX + 220;
         int y = winY + 44;
@@ -553,7 +634,6 @@ public class AmarthaloeMenuScreen extends Screen {
         drawPassportRow(g, "Глаза:", eyes, textX1, y + step * 3);
         drawPassportRow(g, "Голос:", voice, textX2, y + step * 3);
 
-        // Широкие строки под фотографией
         drawPassportRow(g, "Особенности внешности:", features, winX + 15, winY + 145);
         drawPassportRow(g, "Дополнительно:", optional.isEmpty() ? "—" : optional, winX + 15, winY + 168);
     }
@@ -622,7 +702,6 @@ public class AmarthaloeMenuScreen extends Screen {
             g.fill(winX + 12, rowY, winX + 330, rowY + 26, 0xFF151515);
             g.renderOutline(winX + 12, rowY, 318, 26, online ? 0xFF2E5A2E : 0xFF2B2B2B);
 
-            // Мини-аватарка друга (20x20)
             renderAvatarBox(g, photoId, winX + 15, rowY + 3, 20, true);
 
             String statusDot = online ? "§a● " : "§7○ ";
@@ -647,13 +726,12 @@ public class AmarthaloeMenuScreen extends Screen {
             return;
         }
 
-        // Рисуем мини-аватарки (16x16) слева от кнопок контактов и бесед
         List<String> contactIds = new ArrayList<>();
         contactIds.addAll(data.groupChats.keySet());
         contactIds.addAll(data.friends);
 
-        for (int i = 0; i < Math.min(8, contactIds.size()); i++) {
-            String cId = contactIds.get(i);
+        for (int i = 0; i < 8 && (contactListOffset + i) < contactIds.size(); i++) {
+            String cId = contactIds.get(contactListOffset + i);
             String avaId = "";
             if (cId.startsWith("group_")) {
                 CompoundTag gTag = data.groupChats.get(cId);
@@ -687,43 +765,95 @@ public class AmarthaloeMenuScreen extends Screen {
         renderAvatarBox(g, headerAvatarId, winX + 108, winY + 21, 16, true);
         g.drawString(this.font, headerTitle, winX + 128, winY + 25, 0xFFFFFFFF);
 
-        g.fill(winX + 108, winY + 40, winX + 332, winY + ySize - 48, 0xFF0B0B0B);
-        g.renderOutline(winX + 108, winY + 40, 224, ySize - 88, 0xFF2B2B2B);
+        // Область просмотра истории сообщений
+        int boxX = winX + 108;
+        int boxY = winY + 40;
+        int boxW = 224;
+        int boxH = ySize - 88;
 
+        g.fill(boxX, boxY, boxX + boxW, boxY + boxH, 0xFF0B0B0B);
+        g.renderOutline(boxX, boxY, boxW, boxH, 0xFF2B2B2B);
+
+        // 1. Формируем полный список элементов (текстовые строки + блоки картинок) в строгом хронологическом порядке
         List<String> history = PassportNetworking.CLIENT_DM_HISTORY.getOrDefault(activeChatFriendUuid, List.of());
-        int start = Math.max(0, history.size() - 8);
-        int msgY = winY + 45;
+        List<ChatRenderLine> renderLines = new ArrayList<>();
+        int totalHeight = 6;
 
-        for (int i = start; i < history.size(); i++) {
-            String raw = history.get(i);
-            // Если строка — отправленная фотография: "[IMG:imageId|SenderName]"
+        for (String raw : history) {
             if (raw.startsWith("[IMG:") && raw.endsWith("]")) {
                 String inner = raw.substring(5, raw.length() - 1);
                 String[] parts = inner.split("\\|", 2);
                 String imgId = parts[0];
                 String senderName = parts.length > 1 ? parts[1] : "Игрок";
 
-                if (msgY + 46 < winY + ySize - 50) {
-                    g.drawString(this.font, "§e" + senderName + " §7прислал(а) фото §8(клик):", winX + 113, msgY, 0xFFFFFFFF);
-                    msgY += 10;
-                    g.fill(winX + 115, msgY, winX + 165, msgY + 34, 0xFF1A1A1A);
-                    if (ClientImageManager.drawImage(g, imgId, winX + 116, msgY + 1, 48, 32)) {
-                        clickableImages.add(new ClickableImageArea(winX + 115, msgY, 50, 34, imgId));
-                    } else {
-                        g.drawString(this.font, "Загрузка...", winX + 118, msgY + 12, 0xFF777777);
-                    }
-                    g.renderOutline(winX + 115, msgY, 50, 34, 0xFF8F7A42);
-                    msgY += 38;
-                }
+                FormattedCharSequence caption = Component.literal("§e" + senderName + " §7прислал(а) фото §8(клик):").getVisualOrderText();
+                renderLines.add(new ChatRenderLine(false, caption, null, 11));
+                totalHeight += 11;
+
+                renderLines.add(new ChatRenderLine(true, null, imgId, 42));
+                totalHeight += 42;
             } else {
-                List<FormattedCharSequence> wrapped = this.font.split(Component.literal(raw), 214);
+                List<FormattedCharSequence> wrapped = this.font.split(Component.literal(raw), 204);
                 for (FormattedCharSequence line : wrapped) {
-                    if (msgY < winY + ySize - 56) {
-                        g.drawString(this.font, line, winX + 113, msgY, 0xFFFFFFFF);
-                        msgY += 11;
-                    }
+                    renderLines.add(new ChatRenderLine(false, line, null, 11));
+                    totalHeight += 11;
                 }
             }
+        }
+
+        // 2. Вычисляем диапазон скролла (0 = самый низ, maxChatScroll = самый верх)
+        this.maxChatScroll = Math.max(0, totalHeight - (boxH - 6));
+        this.chatScrollOffset = Math.clamp(this.chatScrollOffset, 0.0f, (float) this.maxChatScroll);
+
+        // Если сообщений мало, рисуем сверху вниз; если много — привязываем к низу + учитываем chatScrollOffset
+        int currentY = (totalHeight <= boxH - 6)
+                ? (boxY + 4)
+                : (boxY + boxH - 4 - totalHeight + (int) this.chatScrollOffset);
+
+        // Включаем аппаратную обрезку (Scissor), чтобы элементы плавно уходили за края рамок при прокрутке
+        g.enableScissor(boxX + 1, boxY + 1, boxX + boxW - 9, boxY + boxH - 1);
+
+        for (ChatRenderLine item : renderLines) {
+            if (currentY + item.height >= boxY && currentY <= boxY + boxH) {
+                if (!item.isImage) {
+                    g.drawString(this.font, item.text, boxX + 5, currentY, 0xFFFFFFFF);
+                } else {
+                    int imgX = boxX + 7;
+                    int imgY = currentY + 1;
+                    int imgW = 54;
+                    int imgH = 38;
+                    g.fill(imgX, imgY, imgX + imgW, imgY + imgH, 0xFF1A1A1A);
+                    if (ClientImageManager.drawImage(g, item.imageId, imgX + 1, imgY + 1, imgW - 2, imgH - 2)) {
+                        // Записываем кликабельную область только для видимой части внутри окна чата
+                        int clipTop = Math.max(imgY, boxY + 1);
+                        int clipBottom = Math.min(imgY + imgH, boxY + boxH - 1);
+                        if (clipBottom > clipTop) {
+                            clickableImages.add(new ClickableImageArea(imgX, clipTop, imgW, clipBottom - clipTop, item.imageId));
+                        }
+                    } else {
+                        g.drawString(this.font, "Загрузка...", imgX + 4, imgY + 14, 0xFF777777);
+                    }
+                    g.renderOutline(imgX, imgY, imgW, imgH, 0xFF8F7A42);
+                }
+            } else if (item.isImage) {
+                // Даже если картинка сейчас прокручена за экран, ставим ее в очередь на фоновую загрузку
+                ClientImageManager.getOrRequest(item.imageId);
+            }
+            currentY += item.height;
+        }
+
+        g.disableScissor();
+
+        // 3. Рисуем вертикальный ползунок прокрутки справа
+        int scrollBarX = boxX + boxW - 7;
+        g.fill(scrollBarX, boxY + 1, scrollBarX + 6, boxY + boxH - 1, 0xFF141414);
+        if (maxChatScroll > 0) {
+            int thumbH = Math.max(18, (int) ((float) boxH / (boxH + maxChatScroll) * (boxH - 2)));
+            int trackH = (boxH - 2) - thumbH;
+            float ratioFromTop = 1.0f - (this.chatScrollOffset / (float) this.maxChatScroll);
+            int thumbY = boxY + 1 + (int) (ratioFromTop * trackH);
+
+            g.fill(scrollBarX + 1, thumbY, scrollBarX + 5, thumbY + thumbH, isDraggingChatScrollbar ? 0xFFFFD700 : 0xFF8F7A42);
         }
     }
 
