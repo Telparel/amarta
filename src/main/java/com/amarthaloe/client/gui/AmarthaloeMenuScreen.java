@@ -140,4 +140,109 @@ public class AmarthaloeMenuScreen extends Screen {
         return box;
     }
 
-    // В 1.21.1 фон и рамки рисуются здесь — ПОСЛЕ размытия мира, чтобы
+    // В 1.21.1 фон и рамки рисуются здесь — ПОСЛЕ размытия мира, чтобы они не блюрились!
+    @Override
+    public void renderBackground(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
+        super.renderBackground(guiGraphics, mouseX, mouseY, partialTick);
+
+        int mainWinX = leftPos + 110;
+        int mainWinY = topPos + 8;
+        int mainWinW = xSize - 118;
+        int mainWinH = ySize - 16;
+
+        // Подложка левой панели кнопок
+        guiGraphics.fill(leftPos + 4, topPos + 8, leftPos + 107, topPos + ySize - 8, 0xCC080808);
+        guiGraphics.renderOutline(leftPos + 4, topPos + 8, 103, ySize - 16, 0xFF2A2A2A);
+
+        // Подложка основного окна справа (четкая, без блюра)
+        guiGraphics.fill(mainWinX, mainWinY, mainWinX + mainWinW, mainWinY + mainWinH, 0xF2101010);
+        guiGraphics.renderOutline(mainWinX, mainWinY, mainWinW, mainWinH, 0xFF3A3A3A);
+        guiGraphics.renderOutline(mainWinX + 1, mainWinY + 1, mainWinW - 2, mainWinH - 2, 0xFF8F7A42);
+    }
+
+    @Override
+    public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
+        // Сначала вызываем super.render (он нарисует фон из renderBackground и все кнопки/поля)
+        super.render(guiGraphics, mouseX, mouseY, partialTick);
+
+        int mainWinX = leftPos + 110;
+        int mainWinY = topPos + 8;
+
+        // Теперь ПОВЕРХ всего (в полной резкости!) рисуем заголовки и подписи
+        if (currentTab.equals("ИГРОК")) {
+            renderPassportContent(guiGraphics, mainWinX, mainWinY);
+        } else {
+            guiGraphics.drawString(this.font, "РАЗДЕЛ: " + currentTab, mainWinX + 15, mainWinY + 15, 0xFFE0C068);
+            guiGraphics.drawString(this.font, "Модуль в разработке...", mainWinX + 15, mainWinY + 35, 0xFF777777);
+        }
+    }
+
+    private void renderPassportContent(GuiGraphics g, int winX, int winY) {
+        if (Minecraft.getInstance().player == null) return;
+        PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
+
+        g.drawString(this.font, "ПАСПОРТ ПЕРСОНАЖА", winX + 12, winY + 8, 0xFFE0C068);
+
+        if (!data.isLocked) {
+            // Компактное предупреждение, которое точно помещается внутри рамки
+            g.drawString(this.font, "ВНИМАНИЕ: Заполняется ОДИН РАЗ! Смена — через админов.", winX + 12, winY + 20, 0xFFFF5555);
+
+            int col1X = leftPos + 122;
+            int col2X = leftPos + 286;
+            int labelY = topPos + 36;
+            int stepY = 31;
+
+            g.drawString(this.font, "Имя персонажа (для чата):", col1X, labelY, 0xFFBBBBBB);
+            g.drawString(this.font, "Пол персонажа:", col2X, labelY, 0xFFBBBBBB);
+
+            g.drawString(this.font, "Возраст и ДР (без года):", col1X, labelY + stepY, 0xFFBBBBBB);
+            g.drawString(this.font, "Раса:", col2X, labelY + stepY, 0xFFBBBBBB);
+
+            g.drawString(this.font, "Рост и вес:", col1X, labelY + stepY * 2, 0xFFBBBBBB);
+            g.drawString(this.font, "Волосы:", col2X, labelY + stepY * 2, 0xFFBBBBBB);
+
+            g.drawString(this.font, "Глаза:", col1X, labelY + stepY * 3, 0xFFBBBBBB);
+            g.drawString(this.font, "Голос:", col2X, labelY + stepY * 3, 0xFFBBBBBB);
+
+            g.drawString(this.font, "Особенности внешности:", col1X, labelY + stepY * 4, 0xFFBBBBBB);
+            g.drawString(this.font, "Дополнительно (по желанию):", col1X, labelY + stepY * 5, 0xFFBBBBBB);
+        } else {
+            // РЕЖИМ ПРОСМОТРА УТВЕРЖДЕННОГО ПАСПОРТА
+            g.drawString(this.font, "Статус: УТВЕРЖДЕН (Смена через администрацию)", winX + 12, winY + 20, 0xFF55FF55);
+
+            g.fill(winX + 12, winY + 33, winX + 330, winY + 34, 0xFF8F7A42);
+
+            int y = winY + 44;
+            int step = 20;
+
+            drawPassportRow(g, "Имя персонажа:", data.rpName, winX + 15, y);
+            drawPassportRow(g, "Пол:", data.gender, winX + 190, y);
+
+            drawPassportRow(g, "Возраст / ДР:", data.ageAndBirth, winX + 15, y + step);
+            drawPassportRow(g, "Раса:", data.race, winX + 190, y + step);
+
+            drawPassportRow(g, "Рост / Вес:", data.heightWeight, winX + 15, y + step * 2);
+            drawPassportRow(g, "Волосы:", data.hair, winX + 190, y + step * 2);
+
+            drawPassportRow(g, "Глаза:", data.eyes, winX + 15, y + step * 3);
+            drawPassportRow(g, "Голос:", data.voice, winX + 190, y + step * 3);
+
+            drawPassportRow(g, "Особенности внешности:", data.features, winX + 15, y + step * 4 + 4);
+            drawPassportRow(g, "Дополнительно:", data.optional.isEmpty() ? "—" : data.optional, winX + 15, y + step * 5 + 8);
+
+            g.fill(winX + 12, winY + 198, winX + 330, winY + 199, 0xFF3A3A3A);
+            g.drawString(this.font, "Показать паспорт: /passport show <ник>", winX + 15, winY + 208, 0xFFE0C068);
+        }
+    }
+
+    private void drawPassportRow(GuiGraphics g, String label, String value, int x, int y) {
+        g.drawString(this.font, label, x, y, 0xFF888888);
+        int labelWidth = this.font.width(label) + 5;
+        g.drawString(this.font, value.isEmpty() ? "Не указано" : value, x + labelWidth, y, 0xFFFFFFFF);
+    }
+
+    @Override
+    public boolean isPauseScreen() {
+        return false;
+    }
+}
