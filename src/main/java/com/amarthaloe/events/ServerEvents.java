@@ -11,12 +11,14 @@ import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.entity.player.Player;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
@@ -24,12 +26,44 @@ import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 @EventBusSubscriber(modid = "amarthaloe", bus = EventBusSubscriber.Bus.GAME)
 public class ServerEvents {
+
+    // Единый метод обновления имени и в чате, и в ТАБЕ для всех игроков на сервере
+    public static void refreshAllNames(ServerPlayer sp) {
+        sp.refreshDisplayName();
+        sp.refreshTabListName();
+        if (sp.server != null) {
+            sp.server.getPlayerList().broadcastAll(
+                new ClientboundPlayerInfoUpdatePacket(
+                    EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.UPDATE_DISPLAY_NAME),
+                    List.of(sp)
+                )
+            );
+        }
+    }
+
+    // Формирует красивое имя: [Титул] РП-Имя
+    public static Component buildFormattedDisplayName(Player player, String fallbackUsername) {
+        PassportData data = player.getData(PassportData.PASSPORT);
+        String baseName = (data.isLocked && !data.rpName.trim().isEmpty())
+                ? data.rpName
+                : fallbackUsername;
+
+        Faction activeFac = Faction.byId(data.activeTitleFaction);
+        if (activeFac != null && Math.abs(data.getRep(activeFac)) >= 10) {
+            String title = activeFac.getTitle(data.getRep(activeFac), data.isFemale());
+            String color = data.getRep(activeFac) < 0 ? "§4" : activeFac.chatColor;
+            return Component.literal(color + "[" + title + "] §f" + baseName);
+        } else {
+            return Component.literal("§f" + baseName);
+        }
+    }
 
     public static void syncPlayerDataWithOnlineStatus(ServerPlayer sp) {
         PassportData data = sp.getData(PassportData.PASSPORT);
@@ -46,7 +80,6 @@ public class ServerEvents {
             } catch (Exception ignored) {}
         }
 
-        // Синхронизируем список групповых чатов, в которых состоит игрок
         OfflineMailStorage mail = OfflineMailStorage.get(sp.server);
         data.groupChats.clear();
         for (OfflineMailStorage.GroupChatInfo g : mail.getGroupsForPlayer(sp.getStringUUID())) {
@@ -62,7 +95,6 @@ public class ServerEvents {
         OfflineMailStorage mail = OfflineMailStorage.get(sp.server);
         String myUuid = sp.getStringUUID();
 
-        // История с друзьями
         for (String friendUuid : data.friends) {
             PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("CLEAR_HISTORY", friendUuid, ""));
             List<String> history = mail.getHistory(myUuid, friendUuid);
@@ -71,7 +103,6 @@ public class ServerEvents {
             }
         }
 
-        // История групповых чатов
         for (OfflineMailStorage.GroupChatInfo g : mail.getGroupsForPlayer(myUuid)) {
             PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("CLEAR_HISTORY", g.groupId, ""));
             List<String> history = mail.getHistory(g.groupId, g.groupId);
@@ -99,7 +130,7 @@ public class ServerEvents {
     public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer sp) {
             PassportData data = sp.getData(PassportData.PASSPORT);
-            sp.refreshDisplayName();
+            refreshAllNames(sp);
 
             if (!data.isLocked) {
                 sp.sendSystemMessage(Component.literal("§8§m======================================================"));
@@ -166,25 +197,20 @@ public class ServerEvents {
     public static void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
         if (event.getEntity() instanceof ServerPlayer sp) {
             syncPlayerDataWithOnlineStatus(sp);
-            sp.refreshDisplayName();
+            refreshAllNames(sp);
         }
     }
 
+    // 1. Замена имени и титула в ЧАТЕ
     @SubscribeEvent
     public static void onNameFormat(PlayerEvent.NameFormat event) {
-        PassportData data = event.getEntity().getData(PassportData.PASSPORT);
-        String baseName = (data.isLocked && !data.rpName.trim().isEmpty())
-                ? data.rpName
-                : event.getUsername().getString();
+        event.setDisplayname(buildFormattedDisplayName(event.getEntity(), event.getUsername().getString()));
+    }
 
-        Faction activeFac = Faction.byId(data.activeTitleFaction);
-        if (activeFac != null && Math.abs(data.getRep(activeFac)) >= 10) {
-            String title = activeFac.getTitle(data.getRep(activeFac), data.isFemale());
-            String color = data.getRep(activeFac) < 0 ? "§4" : activeFac.chatColor;
-            event.setDisplayname(Component.literal(color + "[" + title + "] §f" + baseName));
-        } else {
-            event.setDisplayname(Component.literal(baseName));
-        }
+    // 2. Замена имени и титула в ТАБЕ СЕРВЕРА (при нажатии Tab)
+    @SubscribeEvent
+    public static void onTabListNameFormat(PlayerEvent.TabListNameFormat event) {
+        event.setDisplayName(buildFormattedDisplayName(event.getEntity(), event.getEntity().getScoreboardName()));
     }
 
     @SubscribeEvent
@@ -199,7 +225,7 @@ public class ServerEvents {
                             PassportData data = target.getData(PassportData.PASSPORT);
                             data.isLocked = false;
                             target.setData(PassportData.PASSPORT, data);
-                            target.refreshDisplayName();
+                            refreshAllNames(target);
                             syncPlayerDataWithOnlineStatus(target);
                             ctx.getSource().sendSuccess(() -> Component.literal("§aПаспорт игрока " + target.getName().getString() + " разблокирован!"), true);
                             return 1;
@@ -406,7 +432,7 @@ public class ServerEvents {
 
         data.setRep(f, newVal);
         target.setData(PassportData.PASSPORT, data);
-        target.refreshDisplayName();
+        refreshAllNames(target);
         syncPlayerDataWithOnlineStatus(target);
 
         String title = f.getTitle(newVal, data.isFemale());
