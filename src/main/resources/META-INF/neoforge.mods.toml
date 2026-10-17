@@ -1,0 +1,10 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="All Rights Reserved"
+
+[[mods]]
+modId="amarthaloe"
+version="0.1.0"
+displayName="Amarthaloe"
+authors="Amarthaloe Team"
+description="RPG и социальный мод для Minecraft 1.21.1"
