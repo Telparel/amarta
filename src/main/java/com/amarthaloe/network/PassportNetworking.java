@@ -24,7 +24,6 @@ import java.util.*;
 @EventBusSubscriber(modid = "amarthaloe", bus = EventBusSubscriber.Bus.MOD)
 public class PassportNetworking {
 
-    // Клиентская история личных сообщений (UUID собеседника -> список строк)
     public static final Map<String, List<String>> CLIENT_DM_HISTORY = new HashMap<>();
 
     public static void addClientMessage(String partnerUuid, String formattedLine) {
@@ -57,7 +56,6 @@ public class PassportNetworking {
         }
     }
 
-    // Универсальный пакет социальных действий: ADD_FRIEND, ACCEPT_FRIEND, DECLINE_FRIEND, REMOVE_FRIEND, INVITE_PARTY, SEND_DM, RECEIVE_DM
     public record SocialActionPayload(String action, String target, String extra) implements CustomPacketPayload {
         public static final Type<SocialActionPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("amarthaloe", "social_action"));
         public static final StreamCodec<FriendlyByteBuf, SocialActionPayload> STREAM_CODEC = StreamCodec.composite(
@@ -156,14 +154,13 @@ public class PassportNetworking {
 
         switch (action) {
             case "ADD_FRIEND" -> {
-                // Поиск игрока по системному нику ИЛИ по РП-имени из паспорта
                 ServerPlayer found = findPlayerByNameOrRpName(sender, targetStr);
                 if (found == null) {
                     sender.sendSystemMessage(Component.literal("§c[Друзья] Игрок с ником или именем «" + targetStr + "» сейчас не найден в сети."));
                     return;
                 }
                 if (found.getUUID().equals(sender.getUUID())) {
-                    sender.sendSystemMessage(Component.literal("§c[Друзья] Нельзя добавить самого себя!"));
+                    sender.sendSystemMessage(Component.literal("§c[Друзья] Нельзя добавить самого себя! (Для теста используй /socialtest request)"));
                     return;
                 }
                 String targetUuid = found.getStringUUID();
@@ -192,17 +189,19 @@ public class PassportNetworking {
                 if (!senderData.incomingRequests.remove(targetStr)) return;
                 senderData.friends.add(targetStr);
 
-                ServerPlayer other = sender.server.getPlayerList().getPlayer(UUID.fromString(targetStr));
-                if (other != null) {
-                    PassportData otherData = other.getData(PassportData.PASSPORT);
-                    otherData.friends.add(senderUuid);
-                    otherData.incomingRequests.remove(senderUuid);
-                    otherData.knownProfiles.put(senderUuid, senderData.toProfileSnapshot(senderUuid, sender.getName().getString(), true));
-                    senderData.knownProfiles.put(targetStr, otherData.toProfileSnapshot(targetStr, other.getName().getString(), true));
-                    other.setData(PassportData.PASSPORT, otherData);
-                    other.sendSystemMessage(Component.literal("§6[Друзья] §a" + senderName + " принял(а) ваш запрос в друзья!"));
-                    other.playNotifySound(SoundEvents.PLAYER_LEVELUP, SoundSource.MASTER, 0.6f, 1.3f);
-                    ServerEvents.syncPlayerDataWithOnlineStatus(other);
+                if (!targetStr.startsWith("bot-")) {
+                    ServerPlayer other = sender.server.getPlayerList().getPlayer(UUID.fromString(targetStr));
+                    if (other != null) {
+                        PassportData otherData = other.getData(PassportData.PASSPORT);
+                        otherData.friends.add(senderUuid);
+                        otherData.incomingRequests.remove(senderUuid);
+                        otherData.knownProfiles.put(senderUuid, senderData.toProfileSnapshot(senderUuid, sender.getName().getString(), true));
+                        senderData.knownProfiles.put(targetStr, otherData.toProfileSnapshot(targetStr, other.getName().getString(), true));
+                        other.setData(PassportData.PASSPORT, otherData);
+                        other.sendSystemMessage(Component.literal("§6[Друзья] §a" + senderName + " принял(а) ваш запрос в друзья!"));
+                        other.playNotifySound(SoundEvents.PLAYER_LEVELUP, SoundSource.MASTER, 0.6f, 1.3f);
+                        ServerEvents.syncPlayerDataWithOnlineStatus(other);
+                    }
                 }
                 sender.setData(PassportData.PASSPORT, senderData);
                 sender.sendSystemMessage(Component.literal("§6[Друзья] §aЗаявка в друзья принята!"));
@@ -215,18 +214,27 @@ public class PassportNetworking {
             }
             case "REMOVE_FRIEND" -> {
                 senderData.friends.remove(targetStr);
-                ServerPlayer other = sender.server.getPlayerList().getPlayer(UUID.fromString(targetStr));
-                if (other != null) {
-                    PassportData otherData = other.getData(PassportData.PASSPORT);
-                    otherData.friends.remove(senderUuid);
-                    other.setData(PassportData.PASSPORT, otherData);
-                    ServerEvents.syncPlayerDataWithOnlineStatus(other);
+                if (!targetStr.startsWith("bot-")) {
+                    ServerPlayer other = sender.server.getPlayerList().getPlayer(UUID.fromString(targetStr));
+                    if (other != null) {
+                        PassportData otherData = other.getData(PassportData.PASSPORT);
+                        otherData.friends.remove(senderUuid);
+                        other.setData(PassportData.PASSPORT, otherData);
+                        ServerEvents.syncPlayerDataWithOnlineStatus(other);
+                    }
                 }
                 sender.setData(PassportData.PASSPORT, senderData);
                 sender.sendSystemMessage(Component.literal("§6[Друзья] §7Игрок удален из списка друзей."));
                 ServerEvents.syncPlayerDataWithOnlineStatus(sender);
             }
             case "INVITE_PARTY" -> {
+                if (targetStr.startsWith("bot-")) {
+                    CompoundTag botProf = senderData.knownProfiles.get(targetStr);
+                    String botName = botProf != null ? botProf.getString("rpName") : "Бот";
+                    sender.sendSystemMessage(Component.literal("§6[Группа] §aВы отправили приглашение в группу персонажу §e" + botName + "§a!"));
+                    sender.playNotifySound(SoundEvents.NOTE_BLOCK_CHIME.value(), SoundSource.MASTER, 1.0f, 1.2f);
+                    return;
+                }
                 ServerPlayer other = sender.server.getPlayerList().getPlayer(UUID.fromString(targetStr));
                 if (other == null) {
                     sender.sendSystemMessage(Component.literal("§c[Группа] Игрок сейчас не в сети!"));
@@ -239,15 +247,26 @@ public class PassportNetworking {
                 other.playNotifySound(SoundEvents.NOTE_BLOCK_CHIME.value(), SoundSource.MASTER, 1.0f, 1.2f);
             }
             case "SEND_DM" -> {
+                String lineForSender = "§7Вы: §f" + extra;
+                PacketDistributor.sendToPlayer(sender, new SocialActionPayload("RECEIVE_DM", targetStr, lineForSender));
+
+                // Если это тестовый бот — генерируем ответ в мессенджер!
+                if (targetStr.startsWith("bot-")) {
+                    CompoundTag botProf = senderData.knownProfiles.get(targetStr);
+                    String botName = botProf != null ? botProf.getString("rpName") : "Житель Исономии";
+                    String reply = "§e" + botName + ": §fПринято к сведению, гражданин! Норма пайка выполнена.";
+                    PacketDistributor.sendToPlayer(sender, new SocialActionPayload("RECEIVE_DM", targetStr, reply));
+                    sender.sendSystemMessage(Component.literal("§6[ЛС от §e" + botName + "§6] §fПринято к сведению, гражданин! Норма пайка выполнена."));
+                    sender.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.6f, 1.5f);
+                    return;
+                }
+
                 ServerPlayer other = sender.server.getPlayerList().getPlayer(UUID.fromString(targetStr));
                 if (other == null) {
                     sender.sendSystemMessage(Component.literal("§c[Мессенджер] Собеседник сейчас не в сети."));
                     return;
                 }
-                String lineForSender = "§7Вы ->: §f" + extra;
                 String lineForReceiver = "§e" + senderName + ": §f" + extra;
-
-                PacketDistributor.sendToPlayer(sender, new SocialActionPayload("RECEIVE_DM", targetStr, lineForSender));
                 PacketDistributor.sendToPlayer(other, new SocialActionPayload("RECEIVE_DM", senderUuid, lineForReceiver));
 
                 other.sendSystemMessage(Component.literal("§6[ЛС от §e" + senderName + "§6] §f" + extra));
