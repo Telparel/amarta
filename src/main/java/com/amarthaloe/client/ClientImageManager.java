@@ -17,7 +17,6 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
@@ -29,10 +28,13 @@ public class ClientImageManager {
     public record LoadedImage(ResourceLocation location, int width, int height) {}
 
     private static final Map<String, LoadedImage> CACHE = new HashMap<>();
-    private static final Set<String> REQUESTED = new HashSet<>();
+    private static final Set<String> QUEUED_OR_REQUESTED = new HashSet<>();
+    private static final Queue<String> REQUEST_QUEUE = new ArrayDeque<>();
+    private static String activeDownloadingId = null;
+    private static long activeDownloadStartTime = 0;
+
     private static final Map<String, byte[][]> INCOMING_CHUNKS = new HashMap<>();
 
-    // Открывает системное окно выбора картинки в отдельном потоке (чтобы игра не зависала)
     public static void pickImageFromDisk(BiConsumer<String, byte[]> onPicked) {
         CompletableFuture.runAsync(() -> {
             String selectedPath;
@@ -60,14 +62,12 @@ public class ClientImageManager {
                     return;
                 }
 
-                // Читаем PNG/JPG и переводим в чистый PNG-массив для NativeImage Майнкрафта
                 BufferedImage bimg = ImageIO.read(f);
                 if (bimg == null) return;
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 ImageIO.write(bimg, "png", baos);
                 byte[] pngBytes = baos.toByteArray();
 
-                // Если после конвертации в PNG размер слегка превысил 2 МБ, проверяем исходный лимит
                 if (pngBytes.length > MAX_FILE_SIZE + 512 * 1024) {
                     Minecraft.getInstance().execute(() -> {
                         if (Minecraft.getInstance().player != null) {
@@ -101,6 +101,11 @@ public class ClientImageManager {
             CACHE.put(imageId, new LoadedImage(loc, w, h));
         } catch (Exception e) {
             e.printStackTrace();
+        } finally {
+            if (imageId.equals(activeDownloadingId)) {
+                activeDownloadingId = null;
+                pumpQueue();
+            }
         }
     }
 
@@ -110,7 +115,7 @@ public class ClientImageManager {
             chunks[chunkIdx] = data;
         }
         for (byte[] c : chunks) {
-            if (c == null) return; // Ждем остальные чанки
+            if (c == null) return;
         }
         INCOMING_CHUNKS.remove(imageId);
         int totalLen = 0;
@@ -124,17 +129,29 @@ public class ClientImageManager {
         registerLocalBytes(imageId, full);
     }
 
+    private static void pumpQueue() {
+        // Если предыдущая загрузка зависла дольше чем на 3 секунды — идем дальше по очереди
+        if (activeDownloadingId != null && System.currentTimeMillis() - activeDownloadStartTime > 3000) {
+            activeDownloadingId = null;
+        }
+        if (activeDownloadingId == null && !REQUEST_QUEUE.isEmpty()) {
+            activeDownloadingId = REQUEST_QUEUE.poll();
+            activeDownloadStartTime = System.currentTimeMillis();
+            PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("REQUEST_IMAGE", activeDownloadingId, ""));
+        }
+    }
+
     public static LoadedImage getOrRequest(String imageId) {
         if (imageId == null || imageId.isEmpty()) return null;
         if (CACHE.containsKey(imageId)) return CACHE.get(imageId);
-        if (!REQUESTED.contains(imageId)) {
-            REQUESTED.add(imageId);
-            PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("REQUEST_IMAGE", imageId, ""));
+        if (!QUEUED_OR_REQUESTED.contains(imageId)) {
+            QUEUED_OR_REQUESTED.add(imageId);
+            REQUEST_QUEUE.add(imageId);
         }
+        pumpQueue();
         return null;
     }
 
-    // Удобная отрисовка любой загруженной картинки в рамке (boxX, boxY, boxW, boxH)
     public static boolean drawImage(GuiGraphics g, String imageId, int x, int y, int w, int h) {
         LoadedImage img = getOrRequest(imageId);
         if (img == null) return false;
