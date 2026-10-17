@@ -3,13 +3,15 @@ package com.amarthaloe.data;
 import com.amarthaloe.rpg.Faction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.StringTag;
+import net.minecraft.nbt.Tag;
 import net.neoforged.neoforge.attachment.AttachmentType;
 import net.neoforged.neoforge.common.util.INBTSerializable;
 import net.neoforged.neoforge.registries.DeferredRegister;
 import net.neoforged.neoforge.registries.NeoForgeRegistries;
 
-import java.util.EnumMap;
-import java.util.Map;
+import java.util.*;
 import java.util.function.Supplier;
 
 public class PassportData implements INBTSerializable<CompoundTag> {
@@ -25,9 +27,14 @@ public class PassportData implements INBTSerializable<CompoundTag> {
     public String voice = "";
     public String optional = "";
 
-    // Репутация по фракциям Исономии и выбранный титул (ID фракции или пусто)
     public final Map<Faction, Integer> reputation = new EnumMap<>(Faction.class);
     public String activeTitleFaction = "";
+
+    // Система друзей (храним UUID в виде строк)
+    public final Set<String> friends = new HashSet<>();
+    public final Set<String> incomingRequests = new HashSet<>();
+    // Кэш имен и паспортов друзей (UUID -> CompoundTag с именем, ником и паспортом)
+    public final Map<String, CompoundTag> knownProfiles = new HashMap<>();
 
     public PassportData() {
         for (Faction f : Faction.values()) {
@@ -45,6 +52,25 @@ public class PassportData implements INBTSerializable<CompoundTag> {
 
     public boolean isFemale() {
         return "Женский".equalsIgnoreCase(gender);
+    }
+
+    public CompoundTag toProfileSnapshot(String uuid, String username, boolean online) {
+        CompoundTag snap = new CompoundTag();
+        snap.putString("uuid", uuid);
+        snap.putString("username", username);
+        snap.putString("rpName", rpName.isEmpty() ? username : rpName);
+        snap.putBoolean("online", online);
+        snap.putBoolean("isLocked", isLocked);
+        snap.putString("gender", gender);
+        snap.putString("ageAndBirth", ageAndBirth);
+        snap.putString("race", race);
+        snap.putString("heightWeight", heightWeight);
+        snap.putString("hair", hair);
+        snap.putString("eyes", eyes);
+        snap.putString("features", features);
+        snap.putString("voice", voice);
+        snap.putString("optional", optional);
+        return snap;
     }
 
     @Override
@@ -68,6 +94,21 @@ public class PassportData implements INBTSerializable<CompoundTag> {
             repTag.putInt(f.id, getRep(f));
         }
         tag.put("reputation", repTag);
+
+        ListTag friendsList = new ListTag();
+        for (String f : friends) friendsList.add(StringTag.valueOf(f));
+        tag.put("friends", friendsList);
+
+        ListTag reqList = new ListTag();
+        for (String r : incomingRequests) reqList.add(StringTag.valueOf(r));
+        tag.put("incomingRequests", reqList);
+
+        CompoundTag profilesTag = new CompoundTag();
+        for (Map.Entry<String, CompoundTag> entry : knownProfiles.entrySet()) {
+            profilesTag.put(entry.getKey(), entry.getValue());
+        }
+        tag.put("knownProfiles", profilesTag);
+
         return tag;
     }
 
@@ -90,6 +131,26 @@ public class PassportData implements INBTSerializable<CompoundTag> {
             CompoundTag repTag = tag.getCompound("reputation");
             for (Faction f : Faction.values()) {
                 reputation.put(f, repTag.getInt(f.id));
+            }
+        }
+
+        friends.clear();
+        if (tag.contains("friends")) {
+            ListTag list = tag.getList("friends", Tag.TAG_STRING);
+            for (int i = 0; i < list.size(); i++) friends.add(list.getString(i));
+        }
+
+        incomingRequests.clear();
+        if (tag.contains("incomingRequests")) {
+            ListTag list = tag.getList("incomingRequests", Tag.TAG_STRING);
+            for (int i = 0; i < list.size(); i++) incomingRequests.add(list.getString(i));
+        }
+
+        knownProfiles.clear();
+        if (tag.contains("knownProfiles")) {
+            CompoundTag profilesTag = tag.getCompound("knownProfiles");
+            for (String key : profilesTag.getAllKeys()) {
+                knownProfiles.put(key, profilesTag.getCompound(key));
             }
         }
     }
