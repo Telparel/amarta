@@ -32,6 +32,28 @@ public class ServerEvents {
             PassportData data = sp.getData(PassportData.PASSPORT);
             PacketDistributor.sendToPlayer(sp, new PassportNetworking.PassportPayload(data.serializeNBT(sp.registryAccess())));
             sp.refreshDisplayName();
+
+            // Приветствие в зависимости от того, заполнен ли паспорт
+            if (!data.isLocked) {
+                // ПЕРВЫЙ ВХОД / НОВИЧОК
+                sp.sendSystemMessage(Component.literal("§8§m======================================================"));
+                sp.sendSystemMessage(Component.literal("§6§l Добро пожаловать в Амарталоэ и суровую Исономию!"));
+                sp.sendSystemMessage(Component.literal("§7 Мир разделен на фракции, законы и контракты Либры."));
+                sp.sendSystemMessage(Component.literal("§e➤ Нажмите клавишу §b[M]§e, чтобы открыть главное меню мода."));
+                sp.sendSystemMessage(Component.literal("§c⚠ Обязательно заполните паспорт персонажа во вкладке «ИГРОК»."));
+                sp.sendSystemMessage(Component.literal("§7 Данные заполняются §lодин раз§7, после чего вступят в силу в чате."));
+                sp.sendSystemMessage(Component.literal("§8§m======================================================"));
+
+                // Крупное уведомление на экране для новичка
+                sp.connection.send(new ClientboundSetTitlesAnimationPacket(10, 100, 20));
+                sp.connection.send(new ClientboundSetTitleTextPacket(Component.literal("§6§lАМАРТАЛОЭ")));
+                sp.connection.send(new ClientboundSetSubtitleTextPacket(Component.literal("§eНажмите [M] и заполните паспорт!")));
+                sp.playNotifySound(SoundEvents.UI_TOAST_CHALLENGE_COMPLETE, SoundSource.MASTER, 0.9f, 0.8f);
+            } else {
+                // ПОВТОРНЫЙ ВХОД / ЗАРЕГИСТРИРОВАННЫЙ ПЕРСОНАЖ
+                String displayName = data.rpName.isEmpty() ? sp.getName().getString() : data.rpName;
+                sp.sendSystemMessage(Component.literal("§6[Амарталоэ] §aДобро пожаловать в Амарталоэ, §e" + displayName + "§a!"));
+            }
         }
     }
 
@@ -44,7 +66,6 @@ public class ServerEvents {
         }
     }
 
-    // Отображение выбранного Титула (с цветом фракции) + Имени из паспорта в чате
     @SubscribeEvent
     public static void onNameFormat(PlayerEvent.NameFormat event) {
         PassportData data = event.getEntity().getData(PassportData.PASSPORT);
@@ -64,7 +85,6 @@ public class ServerEvents {
 
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
-        // 1. Команды паспорта
         event.getDispatcher().register(
             Commands.literal("passport")
                 .then(Commands.literal("reset")
@@ -99,7 +119,6 @@ public class ServerEvents {
                 )
         );
 
-        // 2. Команды репутации Исономии: /rep set|add <игрок> <фракция> <значение>
         event.getDispatcher().register(
             Commands.literal("rep")
                 .requires(source -> source.hasPermission(2))
@@ -152,7 +171,6 @@ public class ServerEvents {
         source.sendSuccess(() -> Component.literal("§6[Весы Либры] §fРепутация §e" + target.getName().getString() + " §fс фракцией «" + f.displayName + "» теперь: §b" + newVal + " §7(" + title + ")"), true);
         target.sendSystemMessage(Component.literal("§6[Весы Либры] §7Отношение с «" + f.displayName + "» изменилось: §e" + (newVal > 0 ? "+" : "") + newVal + " §7(Ранг: " + title + ")"));
 
-        // Если ступень репутации изменилась — выводим уведомление по центру экрана и проигрываем звук!
         if (newTier != oldTier) {
             boolean isUpgrade = newTier > oldTier;
             triggerTierChangeNotification(target, f, title, newVal, isUpgrade);
@@ -162,12 +180,10 @@ public class ServerEvents {
     }
 
     private static void triggerTierChangeNotification(ServerPlayer player, Faction f, String newTitle, int rep, boolean isUpgrade) {
-        // Анимация: 10 тиков появление (0.5 сек), 70 тиков показ (3.5 сек), 20 тиков плавное затухание (1 сек)
         player.connection.send(new ClientboundSetTitlesAnimationPacket(10, 70, 20));
 
         String sign = rep > 0 ? "+" : "";
         if (isUpgrade) {
-            // Повышение ступени: благородный цвет фракции + приятный торжественный звук
             Component mainTitle = Component.literal(f.chatColor + "§l" + f.displayName);
             Component subTitle = Component.literal("§a▲ Новая ступень: §f" + newTitle + " §7(" + sign + rep + ")");
             player.connection.send(new ClientboundSetTitleTextPacket(mainTitle));
@@ -176,7 +192,6 @@ public class ServerEvents {
             player.playNotifySound(SoundEvents.UI_TOAST_CHALLENGE_COMPLETE, SoundSource.MASTER, 0.85f, 1.15f);
             player.playNotifySound(SoundEvents.PLAYER_LEVELUP, SoundSource.MASTER, 0.6f, 0.9f);
         } else {
-            // Падение ступени: тревожный багровый цвет + тяжелый давящий звук
             Component mainTitle = Component.literal("§4§l" + f.displayName);
             Component subTitle = Component.literal("§c▼ Падение ранга: §f" + newTitle + " §7(" + sign + rep + ")");
             player.connection.send(new ClientboundSetTitleTextPacket(mainTitle));
