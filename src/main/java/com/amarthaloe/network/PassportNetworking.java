@@ -1,5 +1,6 @@
 package com.amarthaloe.network;
 
+import com.amarthaloe.data.OfflineMailStorage;
 import com.amarthaloe.data.PassportData;
 import com.amarthaloe.events.ServerEvents;
 import com.amarthaloe.rpg.Faction;
@@ -24,10 +25,18 @@ import java.util.*;
 @EventBusSubscriber(modid = "amarthaloe", bus = EventBusSubscriber.Bus.MOD)
 public class PassportNetworking {
 
+    // Клиентский кэш истории диалогов и непрочитанных сообщений
     public static final Map<String, List<String>> CLIENT_DM_HISTORY = new HashMap<>();
+    public static final Map<String, Integer> CLIENT_UNREAD_COUNTS = new HashMap<>();
 
     public static void addClientMessage(String partnerUuid, String formattedLine) {
         CLIENT_DM_HISTORY.computeIfAbsent(partnerUuid, k -> new ArrayList<>()).add(formattedLine);
+    }
+
+    public static int getTotalClientUnread() {
+        int total = 0;
+        for (int c : CLIENT_UNREAD_COUNTS.values()) total += c;
+        return total;
     }
 
     public record PassportPayload(CompoundTag tag) implements CustomPacketPayload {
@@ -138,8 +147,16 @@ public class PassportNetworking {
                         if (context.flow().isServerbound() && context.player() instanceof ServerPlayer sender) {
                             handleServerSocialAction(sender, payload.action(), payload.target(), payload.extra());
                         } else if (context.flow().isClientbound()) {
-                            if ("RECEIVE_DM".equals(payload.action())) {
-                                addClientMessage(payload.target(), payload.extra());
+                            switch (payload.action()) {
+                                case "RECEIVE_DM" -> addClientMessage(payload.target(), payload.extra());
+                                case "CLEAR_HISTORY" -> CLIENT_DM_HISTORY.remove(payload.target());
+                                case "SET_UNREAD" -> {
+                                    try {
+                                        int count = Integer.parseInt(payload.extra());
+                                        if (count <= 0) CLIENT_UNREAD_COUNTS.remove(payload.target());
+                                        else CLIENT_UNREAD_COUNTS.put(payload.target(), count);
+                                    } catch (NumberFormatException ignored) {}
+                                }
                             }
                         }
                     });
@@ -151,6 +168,7 @@ public class PassportNetworking {
         PassportData senderData = sender.getData(PassportData.PASSPORT);
         String senderUuid = sender.getStringUUID();
         String senderName = senderData.rpName.isEmpty() ? sender.getName().getString() : senderData.rpName;
+        OfflineMailStorage mail = OfflineMailStorage.get(sender.server);
 
         switch (action) {
             case "ADD_FRIEND" -> {
@@ -246,31 +264,54 @@ public class PassportNetworking {
                 other.sendSystemMessage(Component.literal("§6[Группа] §e" + senderName + " §fприглашает вас в группу!"));
                 other.playNotifySound(SoundEvents.NOTE_BLOCK_CHIME.value(), SoundSource.MASTER, 1.0f, 1.2f);
             }
+            case "MARK_READ" -> {
+                mail.markAsRead(senderUuid, targetStr);
+                PacketDistributor.sendToPlayer(sender, new SocialActionPayload("SET_UNREAD", targetStr, "0"));
+            }
             case "SEND_DM" -> {
-                String lineForSender = "§7Вы: §f" + extra;
-                PacketDistributor.sendToPlayer(sender, new SocialActionPayload("RECEIVE_DM", targetStr, lineForSender));
+                String sharedLine = "§e" + senderName + ": §f" + extra;
 
-                // Если это тестовый бот — генерируем ответ в мессенджер!
+                // Если это тестовый бот
                 if (targetStr.startsWith("bot-")) {
                     CompoundTag botProf = senderData.knownProfiles.get(targetStr);
                     String botName = botProf != null ? botProf.getString("rpName") : "Житель Исономии";
-                    String reply = "§e" + botName + ": §fПринято к сведению, гражданин! Норма пайка выполнена.";
-                    PacketDistributor.sendToPlayer(sender, new SocialActionPayload("RECEIVE_DM", targetStr, reply));
-                    sender.sendSystemMessage(Component.literal("§6[ЛС от §e" + botName + "§6] §fПринято к сведению, гражданин! Норма пайка выполнена."));
-                    sender.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.6f, 1.5f);
+                    boolean botOnline = botProf != null && botProf.getBoolean("online");
+
+                    mail.addMessage(senderUuid, targetStr, sharedLine, true);
+                    PacketDistributor.sendToPlayer(sender, new SocialActionPayload("RECEIVE_DM", targetStr, sharedLine));
+
+                    if (botOnline) {
+                        String reply = "§e" + botName + ": §fПринято к сведению, гражданин! Норма пайка выполнена.";
+                        mail.addMessage(targetStr, senderUuid, reply, true);
+                        PacketDistributor.sendToPlayer(sender, new SocialActionPayload("RECEIVE_DM", targetStr, reply));
+                        sender.sendSystemMessage(Component.literal("§6[ЛС от §e" + botName + "§6] §fПринято к сведению, гражданин! Норма пайка выполнена."));
+                        sender.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.6f, 1.5f);
+                    } else {
+                        sender.sendSystemMessage(Component.literal("§6[Почта Исономии] §7" + botName + " сейчас не в сети. Ваше сообщение сохранено и будет доставлено при входе!"));
+                        sender.playNotifySound(SoundEvents.BOOK_PAGE_TURN, SoundSource.MASTER, 0.8f, 1.2f);
+                    }
                     return;
                 }
 
                 ServerPlayer other = sender.server.getPlayerList().getPlayer(UUID.fromString(targetStr));
-                if (other == null) {
-                    sender.sendSystemMessage(Component.literal("§c[Мессенджер] Собеседник сейчас не в сети."));
-                    return;
-                }
-                String lineForReceiver = "§e" + senderName + ": §f" + extra;
-                PacketDistributor.sendToPlayer(other, new SocialActionPayload("RECEIVE_DM", senderUuid, lineForReceiver));
+                boolean isOnline = (other != null);
 
-                other.sendSystemMessage(Component.literal("§6[ЛС от §e" + senderName + "§6] §f" + extra));
-                other.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.6f, 1.5f);
+                // Сохраняем сообщение в серверную базу данных (и для онлайна, и для оффлайна!)
+                mail.addMessage(senderUuid, targetStr, sharedLine, isOnline);
+                PacketDistributor.sendToPlayer(sender, new SocialActionPayload("RECEIVE_DM", targetStr, sharedLine));
+
+                if (isOnline) {
+                    PacketDistributor.sendToPlayer(other, new SocialActionPayload("RECEIVE_DM", senderUuid, sharedLine));
+                    int unread = mail.getUnreadForPlayer(targetStr).getOrDefault(senderUuid, 0) + 1;
+                    PacketDistributor.sendToPlayer(other, new SocialActionPayload("SET_UNREAD", senderUuid, String.valueOf(unread)));
+                    other.sendSystemMessage(Component.literal("§6[ЛС от §e" + senderName + "§6] §f" + extra));
+                    other.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.6f, 1.5f);
+                } else {
+                    CompoundTag targetProf = senderData.knownProfiles.get(targetStr);
+                    String targetName = targetProf != null ? targetProf.getString("rpName") : "Собеседник";
+                    sender.sendSystemMessage(Component.literal("§6[Почта Исономии] §7" + targetName + " не в сети. Сообщение оставлено в почтовом ящике и дойдет при входе!"));
+                    sender.playNotifySound(SoundEvents.BOOK_PAGE_TURN, SoundSource.MASTER, 0.8f, 1.2f);
+                }
             }
         }
     }
