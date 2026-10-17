@@ -45,6 +45,14 @@ public class ServerEvents {
                 }
             } catch (Exception ignored) {}
         }
+
+        // Синхронизируем список групповых чатов, в которых состоит игрок
+        OfflineMailStorage mail = OfflineMailStorage.get(sp.server);
+        data.groupChats.clear();
+        for (OfflineMailStorage.GroupChatInfo g : mail.getGroupsForPlayer(sp.getStringUUID())) {
+            data.groupChats.put(g.groupId, g.toTag());
+        }
+
         sp.setData(PassportData.PASSPORT, data);
         PacketDistributor.sendToPlayer(sp, new PassportNetworking.PassportPayload(data.serializeNBT(sp.registryAccess())));
     }
@@ -54,7 +62,7 @@ public class ServerEvents {
         OfflineMailStorage mail = OfflineMailStorage.get(sp.server);
         String myUuid = sp.getStringUUID();
 
-        // Отправляем клиенту сохраненную историю переписок по всем друзьям
+        // История с друзьями
         for (String friendUuid : data.friends) {
             PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("CLEAR_HISTORY", friendUuid, ""));
             List<String> history = mail.getHistory(myUuid, friendUuid);
@@ -63,7 +71,15 @@ public class ServerEvents {
             }
         }
 
-        // Синхронизируем счетчики непрочитанных сообщений
+        // История групповых чатов
+        for (OfflineMailStorage.GroupChatInfo g : mail.getGroupsForPlayer(myUuid)) {
+            PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("CLEAR_HISTORY", g.groupId, ""));
+            List<String> history = mail.getHistory(g.groupId, g.groupId);
+            for (String line : history) {
+                PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("RECEIVE_DM", g.groupId, line));
+            }
+        }
+
         Map<String, Integer> unreadMap = mail.getUnreadForPlayer(myUuid);
         for (Map.Entry<String, Integer> entry : unreadMap.entrySet()) {
             PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("SET_UNREAD", entry.getKey(), String.valueOf(entry.getValue())));
@@ -72,7 +88,7 @@ public class ServerEvents {
         int totalUnread = mail.getTotalUnread(myUuid);
         if (totalUnread > 0) {
             sp.sendSystemMessage(Component.literal("§8§m------------------------------------------------------"));
-            sp.sendSystemMessage(Component.literal("§6✉ [Почта Исономии] §eУ вас §c§l" + totalUnread + " §eнепрочитанных сообщений, полученных пока вы были не в сети!"));
+            sp.sendSystemMessage(Component.literal("§6✉ [Почта Исономии] §eУ вас §c§l" + totalUnread + " §eнепрочитанных сообщений!"));
             sp.sendSystemMessage(Component.literal("§7Откройте меню §b[M] -> СООБЩЕНИЯ§7, чтобы прочитать их."));
             sp.sendSystemMessage(Component.literal("§8§m------------------------------------------------------"));
             sp.playNotifySound(SoundEvents.NOTE_BLOCK_CHIME.value(), SoundSource.MASTER, 1.0f, 1.1f);
@@ -324,7 +340,6 @@ public class ServerEvents {
                         return 1;
                     })
                 )
-                // Симуляция получения оффлайн-сообщений и входа на сервер
                 .then(Commands.literal("offlinemsg")
                     .executes(ctx -> {
                         ServerPlayer sp = ctx.getSource().getPlayerOrException();
