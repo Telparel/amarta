@@ -1,5 +1,6 @@
 package com.amarthaloe.client.gui;
 
+import com.amarthaloe.client.ClientImageManager;
 import com.amarthaloe.data.PassportData;
 import com.amarthaloe.network.PassportNetworking;
 import com.amarthaloe.rpg.Faction;
@@ -27,18 +28,27 @@ public class AmarthaloeMenuScreen extends Screen {
 
     // Элементы паспорта
     private EditBox nameBox, ageBirthBox, raceBox, heightWeightBox, hairBox, eyesBox, featuresBox, voiceBox, optionalBox;
-    private DarkButton genderBtn, confirmBtn;
+    private DarkButton genderBtn, confirmBtn, uploadPhotoBtn;
     private String selectedGender = "Мужской";
+    private String pendingPassportPhotoId = "";
 
     // Репутация
     private int selectedFactionIdx = 3;
 
-    // Друзья и Мессенджер
+    // Друзья, Групповые чаты и Мессенджер
     private EditBox addFriendBox;
     private EditBox chatInputBox;
+    private EditBox groupTitleBox, inviteGroupMemberBox;
     private String viewingFriendPassportUuid = null;
     private String activeChatFriendUuid = null;
+    private boolean creatingGroupMode = false;
+    private String pendingGroupAvatarId = "";
     private int friendsPage = 0;
+
+    // Полноэкранный просмотр фотографии по клику (Лайтбокс)
+    private String zoomedImageId = null;
+    private record ClickableImageArea(int x, int y, int w, int h, String imageId) {}
+    private final List<ClickableImageArea> clickableImages = new ArrayList<>();
 
     public AmarthaloeMenuScreen() {
         super(Component.literal("Amarthaloe Menu"));
@@ -74,6 +84,8 @@ public class AmarthaloeMenuScreen extends Screen {
             DarkButton btn = new DarkButton(startX, startY + (i * (btnHeight + 4)), btnWidth, btnHeight, Component.literal(displayTab), (button) -> {
                 this.currentTab = tabName;
                 this.viewingFriendPassportUuid = null;
+                this.creatingGroupMode = false;
+                this.zoomedImageId = null;
                 this.rebuildWidgets();
             });
             btn.setSelected(tabName.equals(currentTab));
@@ -182,45 +194,106 @@ public class AmarthaloeMenuScreen extends Screen {
         int winX = leftPos + 110;
         int winY = topPos + 8;
 
-        List<String> friendList = new ArrayList<>(data.friends);
-        if (activeChatFriendUuid == null && !friendList.isEmpty()) {
-            activeChatFriendUuid = friendList.get(0);
+        // Кнопка создания группового чата сверху над контактами
+        DarkButton newGroupBtn = new DarkButton(winX + 8, winY + 24, 92, 18, Component.literal("+ Создать беседу"), (b) -> {
+            creatingGroupMode = !creatingGroupMode;
+            this.rebuildWidgets();
+        });
+        newGroupBtn.setSelected(creatingGroupMode);
+        this.addRenderableWidget(newGroupBtn);
+
+        if (creatingGroupMode) {
+            groupTitleBox = createField(winX + 115, winY + 55, 200, 18, "", 32, "Название группового чата...");
+            DarkButton pickGroupAvaBtn = new DarkButton(winX + 115, winY + 82, 200, 20,
+                    Component.literal(pendingGroupAvatarId.isEmpty() ? "📷 Выбрать аватарку (до 2 МБ)" : "✔ Аватарка загружена!"), (b) -> {
+                ClientImageManager.pickImageFromDisk((imgId, bytes) -> {
+                    this.pendingGroupAvatarId = imgId;
+                    this.rebuildWidgets();
+                });
+            });
+            DarkButton confirmCreateGroupBtn = new DarkButton(winX + 115, winY + 112, 200, 20, Component.literal("СОЗДАТЬ ГРУППОВОЙ ЧАТ"), (b) -> {
+                String title = groupTitleBox.getValue().trim();
+                if (!title.isEmpty()) {
+                    PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("CREATE_GROUP", title, pendingGroupAvatarId));
+                    creatingGroupMode = false;
+                    pendingGroupAvatarId = "";
+                    this.rebuildWidgets();
+                }
+            });
+            this.addRenderableWidget(pickGroupAvaBtn);
+            this.addRenderableWidget(confirmCreateGroupBtn);
+            return;
         }
 
-        // Если мы открыли диалог с другом, у которого были непрочитанные сообщения — помечаем их прочитанными!
+        // Собираем единый список контактов: сначала групповые чаты, затем друзья
+        List<String> contactIds = new ArrayList<>();
+        contactIds.addAll(data.groupChats.keySet());
+        contactIds.addAll(data.friends);
+
+        if (activeChatFriendUuid == null && !contactIds.isEmpty()) {
+            activeChatFriendUuid = contactIds.get(0);
+        }
+
         if (activeChatFriendUuid != null && PassportNetworking.CLIENT_UNREAD_COUNTS.getOrDefault(activeChatFriendUuid, 0) > 0) {
             PassportNetworking.CLIENT_UNREAD_COUNTS.remove(activeChatFriendUuid);
             PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("MARK_READ", activeChatFriendUuid, ""));
         }
 
-        for (int i = 0; i < Math.min(8, friendList.size()); i++) {
-            String fUuid = friendList.get(i);
-            CompoundTag prof = data.knownProfiles.get(fUuid);
-            String name = prof != null ? prof.getString("rpName") : "Друг";
-            int unread = PassportNetworking.CLIENT_UNREAD_COUNTS.getOrDefault(fUuid, 0);
+        for (int i = 0; i < Math.min(8, contactIds.size()); i++) {
+            String cId = contactIds.get(i);
+            String name;
+            if (cId.startsWith("group_")) {
+                CompoundTag gTag = data.groupChats.get(cId);
+                name = gTag != null ? "§6#§f" + gTag.getString("title") : "Беседа";
+            } else {
+                CompoundTag prof = data.knownProfiles.get(cId);
+                name = prof != null ? prof.getString("rpName") : "Друг";
+            }
 
+            int unread = PassportNetworking.CLIENT_UNREAD_COUNTS.getOrDefault(cId, 0);
             if (name.length() > 9) name = name.substring(0, 9) + ".";
             if (unread > 0) name = name + " §c+" + unread;
 
-            DarkButton contactBtn = new DarkButton(winX + 10, winY + 28 + i * 24, 90, 20, Component.literal(name), (b) -> {
-                activeChatFriendUuid = fUuid;
-                PassportNetworking.CLIENT_UNREAD_COUNTS.remove(fUuid);
-                PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("MARK_READ", fUuid, ""));
+            // Оставляем слева 16 пикселей под мини-аватарку (кнопка шириной 74 на X = winX + 26)
+            DarkButton contactBtn = new DarkButton(winX + 26, winY + 46 + i * 24, 74, 20, Component.literal(name), (b) -> {
+                activeChatFriendUuid = cId;
+                PassportNetworking.CLIENT_UNREAD_COUNTS.remove(cId);
+                PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("MARK_READ", cId, ""));
                 this.rebuildWidgets();
             });
-            contactBtn.setSelected(fUuid.equals(activeChatFriendUuid));
+            contactBtn.setSelected(cId.equals(activeChatFriendUuid));
             this.addRenderableWidget(contactBtn);
         }
 
         if (activeChatFriendUuid != null) {
-            chatInputBox = createField(winX + 108, winY + ySize - 42, 165, 18, "", 120, "Сообщение (даже в оффлайн)...");
-            DarkButton sendBtn = new DarkButton(winX + 277, winY + ySize - 42, 55, 18, Component.literal("Отпр."), (b) -> {
+            // Если это групповой чат — сверху справа поле добавления участника
+            if (activeChatFriendUuid.startsWith("group_")) {
+                inviteGroupMemberBox = createField(winX + 215, winY + 22, 78, 15, "", 32, "Ник/Имя...");
+                DarkButton addMemberBtn = new DarkButton(winX + 295, winY + 22, 37, 15, Component.literal("+Уч."), (b) -> {
+                    String val = inviteGroupMemberBox.getValue().trim();
+                    if (!val.isEmpty()) {
+                        PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("ADD_GROUP_MEMBER", activeChatFriendUuid, val));
+                        inviteGroupMemberBox.setValue("");
+                    }
+                });
+                this.addRenderableWidget(addMemberBtn);
+            }
+
+            // Поле ввода текста + Кнопка [📷] (прикрепить фото до 2 МБ) + Кнопка [Отпр.]
+            chatInputBox = createField(winX + 108, winY + ySize - 42, 138, 18, "", 120, "Сообщение...");
+            DarkButton sendPhotoBtn = new DarkButton(winX + 249, winY + ySize - 42, 26, 18, Component.literal("📷"), (b) -> {
+                ClientImageManager.pickImageFromDisk((imgId, bytes) -> {
+                    PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("SEND_DM", activeChatFriendUuid, "[IMG:" + imgId + "]"));
+                });
+            });
+            DarkButton sendBtn = new DarkButton(winX + 278, winY + ySize - 42, 54, 18, Component.literal("Отпр."), (b) -> {
                 String msg = chatInputBox.getValue().trim();
                 if (!msg.isEmpty()) {
                     PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("SEND_DM", activeChatFriendUuid, msg));
                     chatInputBox.setValue("");
                 }
             });
+            this.addRenderableWidget(sendPhotoBtn);
             this.addRenderableWidget(sendBtn);
         }
     }
@@ -277,6 +350,9 @@ public class AmarthaloeMenuScreen extends Screen {
         if (data.isLocked) return;
 
         this.selectedGender = data.gender.isEmpty() ? "Мужской" : data.gender;
+        if (this.pendingPassportPhotoId.isEmpty() && !data.photoId.isEmpty()) {
+            this.pendingPassportPhotoId = data.photoId;
+        }
 
         int col1X = leftPos + 122;
         int col2X = leftPos + 286;
@@ -304,7 +380,17 @@ public class AmarthaloeMenuScreen extends Screen {
         featuresBox = createField(col1X, startY + stepY * 4, fullW, fieldH, data.features, 80, "Шрам над бровью, легкая хромота...");
         optionalBox = createField(col1X, startY + stepY * 5, fullW, fieldH, data.optional, 80, "Любая деталь по желанию (необязательно)");
 
-        confirmBtn = new DarkButton(col1X + 48, topPos + ySize - 32, 220, 20, Component.literal("ПОДТВЕРДИТЬ ПАСПОРТ (НАВСЕГДА)"), (btn) -> {
+        // Кнопка загрузки фото персонажа (один раз при заполнении паспорта)
+        uploadPhotoBtn = new DarkButton(col1X, topPos + ySize - 32, 118, 20,
+                Component.literal(pendingPassportPhotoId.isEmpty() ? "📷 Фото (до 2 МБ)" : "✔ Фото выбрано"), (btn) -> {
+            ClientImageManager.pickImageFromDisk((imgId, bytes) -> {
+                this.pendingPassportPhotoId = imgId;
+                this.rebuildWidgets();
+            });
+        });
+        this.addRenderableWidget(uploadPhotoBtn);
+
+        confirmBtn = new DarkButton(col1X + 124, topPos + ySize - 32, 192, 20, Component.literal("УТВЕРДИТЬ ПАСПОРТ (НАВСЕГДА)"), (btn) -> {
             if (nameBox.getValue().trim().isEmpty()) {
                 nameBox.setSuggestion("Укажите имя!");
                 return;
@@ -321,6 +407,7 @@ public class AmarthaloeMenuScreen extends Screen {
             current.features = featuresBox.getValue().trim();
             current.voice = voiceBox.getValue().trim();
             current.optional = optionalBox.getValue().trim();
+            current.photoId = pendingPassportPhotoId;
 
             Minecraft.getInstance().player.setData(PassportData.PASSPORT, current);
             PacketDistributor.sendToServer(new PassportNetworking.PassportPayload(current.serializeNBT(Minecraft.getInstance().player.registryAccess())));
@@ -357,6 +444,7 @@ public class AmarthaloeMenuScreen extends Screen {
 
     @Override
     public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
+        clickableImages.clear();
         super.render(guiGraphics, mouseX, mouseY, partialTick);
 
         int mainWinX = leftPos + 110;
@@ -373,6 +461,101 @@ public class AmarthaloeMenuScreen extends Screen {
                 guiGraphics.drawString(this.font, "Модуль в разработке...", mainWinX + 15, mainWinY + 35, 0xFF777777);
             }
         }
+
+        // Если игрок кликнул на фотографию — рисуем полноэкранное увеличение поверх всего!
+        if (zoomedImageId != null) {
+            guiGraphics.pose().pushPose();
+            guiGraphics.pose().translate(0, 0, 400);
+            guiGraphics.fill(0, 0, this.width, this.height, 0xDD000000);
+
+            ClientImageManager.LoadedImage img = ClientImageManager.getOrRequest(zoomedImageId);
+            if (img != null) {
+                int maxW = (int) (this.width * 0.75);
+                int maxH = (int) (this.height * 0.75);
+                float scale = Math.min((float) maxW / img.width(), (float) maxH / img.height());
+                int drawW = Math.max(32, (int) (img.width() * scale));
+                int drawH = Math.max(32, (int) (img.height() * scale));
+                int drawX = (this.width - drawW) / 2;
+                int drawY = (this.height - drawH) / 2;
+
+                guiGraphics.fill(drawX - 3, drawY - 3, drawX + drawW + 3, drawY + drawH + 3, 0xFF141414);
+                guiGraphics.renderOutline(drawX - 3, drawY - 3, drawW + 6, drawH + 6, 0xFFD4AF37);
+                ClientImageManager.drawImage(guiGraphics, zoomedImageId, drawX, drawY, drawW, drawH);
+            }
+            guiGraphics.drawCenteredString(this.font, "§eНажмите в любое место экрана, чтобы закрыть фото", this.width / 2, this.height - 22, 0xFFFFFFFF);
+            guiGraphics.pose().popPose();
+        }
+    }
+
+    @Override
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (zoomedImageId != null) {
+            zoomedImageId = null;
+            return true;
+        }
+        for (ClickableImageArea area : clickableImages) {
+            if (mouseX >= area.x && mouseX <= area.x + area.w && mouseY >= area.y && mouseY <= area.y + area.h) {
+                if (area.imageId != null && !area.imageId.isEmpty()) {
+                    zoomedImageId = area.imageId;
+                    return true;
+                }
+            }
+        }
+        return super.mouseClicked(mouseX, mouseY, button);
+    }
+
+    private void renderAvatarBox(GuiGraphics g, String photoId, int x, int y, int size, boolean clickable) {
+        g.fill(x, y, x + size, y + size, 0xFF1A1A1A);
+        boolean drawn = ClientImageManager.drawImage(g, photoId, x + 1, y + 1, size - 2, size - 2);
+        if (!drawn) {
+            g.drawCenteredString(this.font, "?", x + size / 2, y + (size - 8) / 2, 0xFF555555);
+        } else if (clickable) {
+            clickableImages.add(new ClickableImageArea(x, y, size, size, photoId));
+        }
+        g.renderOutline(x, y, size, size, 0xFF8F7A42);
+    }
+
+    private void renderApprovedPassportSheet(GuiGraphics g, int winX, int winY, String rpName, String gender,
+                                             String ageAndBirth, String race, String heightWeight, String hair,
+                                             String eyes, String features, String voice, String optional, String photoId) {
+        // Портретная рамка фотографии слева (68x86), кликабельная для увеличения
+        int photoX = winX + 14;
+        int photoY = winY + 42;
+        int photoW = 68;
+        int photoH = 86;
+
+        g.fill(photoX, photoY, photoX + photoW, photoY + photoH, 0xFF161616);
+        boolean hasPhoto = ClientImageManager.drawImage(g, photoId, photoX + 2, photoY + 2, photoW - 4, photoH - 4);
+        g.renderOutline(photoX, photoY, photoW, photoH, 0xFFD4AF37);
+
+        if (hasPhoto) {
+            clickableImages.add(new ClickableImageArea(photoX, photoY, photoW, photoH, photoId));
+            g.drawCenteredString(this.font, "§8[Клик — увелич.]", photoX + photoW / 2, photoY + photoH + 3, 0xFF888888);
+        } else {
+            g.drawCenteredString(this.font, "Нет фото", photoX + photoW / 2, photoY + 38, 0xFF555555);
+        }
+
+        // Данные справа от фотографии
+        int textX1 = winX + 90;
+        int textX2 = winX + 220;
+        int y = winY + 44;
+        int step = 20;
+
+        drawPassportRow(g, "Имя:", rpName, textX1, y);
+        drawPassportRow(g, "Пол:", gender, textX2, y);
+
+        drawPassportRow(g, "Возраст/ДР:", ageAndBirth, textX1, y + step);
+        drawPassportRow(g, "Раса:", race, textX2, y + step);
+
+        drawPassportRow(g, "Рост/Вес:", heightWeight, textX1, y + step * 2);
+        drawPassportRow(g, "Волосы:", hair, textX2, y + step * 2);
+
+        drawPassportRow(g, "Глаза:", eyes, textX1, y + step * 3);
+        drawPassportRow(g, "Голос:", voice, textX2, y + step * 3);
+
+        // Широкие строки под фотографией
+        drawPassportRow(g, "Особенности внешности:", features, winX + 15, winY + 145);
+        drawPassportRow(g, "Дополнительно:", optional.isEmpty() ? "—" : optional, winX + 15, winY + 168);
     }
 
     private void renderFriendsContent(GuiGraphics g, int winX, int winY) {
@@ -389,18 +572,11 @@ public class AmarthaloeMenuScreen extends Screen {
                 return;
             }
 
-            int y = winY + 36;
-            int step = 20;
-            drawPassportRow(g, "Имя персонажа:", prof.getString("rpName"), winX + 15, y);
-            drawPassportRow(g, "Пол:", prof.getString("gender"), winX + 190, y);
-            drawPassportRow(g, "Возраст / ДР:", prof.getString("ageAndBirth"), winX + 15, y + step);
-            drawPassportRow(g, "Раса:", prof.getString("race"), winX + 190, y + step);
-            drawPassportRow(g, "Рост / Вес:", prof.getString("heightWeight"), winX + 15, y + step * 2);
-            drawPassportRow(g, "Волосы:", prof.getString("hair"), winX + 190, y + step * 2);
-            drawPassportRow(g, "Глаза:", prof.getString("eyes"), winX + 15, y + step * 3);
-            drawPassportRow(g, "Голос:", prof.getString("voice"), winX + 190, y + step * 3);
-            drawPassportRow(g, "Особенности внешности:", prof.getString("features"), winX + 15, y + step * 4 + 4);
-            drawPassportRow(g, "Дополнительно:", prof.getString("optional").isEmpty() ? "—" : prof.getString("optional"), winX + 15, y + step * 5 + 8);
+            renderApprovedPassportSheet(g, winX, winY,
+                    prof.getString("rpName"), prof.getString("gender"), prof.getString("ageAndBirth"),
+                    prof.getString("race"), prof.getString("heightWeight"), prof.getString("hair"),
+                    prof.getString("eyes"), prof.getString("features"), prof.getString("voice"),
+                    prof.getString("optional"), prof.getString("photoId"));
             return;
         }
 
@@ -439,16 +615,19 @@ public class AmarthaloeMenuScreen extends Screen {
             String fUuid = friendList.get(startIdx + i);
             CompoundTag prof = data.knownProfiles.get(fUuid);
             String rpName = prof != null ? prof.getString("rpName") : "Игрок";
-            String username = prof != null ? prof.getString("username") : "";
             boolean online = prof != null && prof.getBoolean("online");
+            String photoId = prof != null ? prof.getString("photoId") : "";
 
             int rowY = currentY + i * 32;
             g.fill(winX + 12, rowY, winX + 330, rowY + 26, 0xFF151515);
             g.renderOutline(winX + 12, rowY, 318, 26, online ? 0xFF2E5A2E : 0xFF2B2B2B);
 
+            // Мини-аватарка друга (20x20)
+            renderAvatarBox(g, photoId, winX + 15, rowY + 3, 20, true);
+
             String statusDot = online ? "§a● " : "§7○ ";
-            g.drawString(this.font, statusDot + "§f" + rpName, winX + 18, rowY + 4, 0xFFFFFFFF);
-            g.drawString(this.font, (online ? "§aВ сети" : "§8Не в сети (ЛС доступно)") + (username.isEmpty() ? "" : " §8(" + username + ")"), winX + 18, rowY + 14, 0xFF888888);
+            g.drawString(this.font, statusDot + "§f" + rpName, winX + 39, rowY + 4, 0xFFFFFFFF);
+            g.drawString(this.font, online ? "§aВ сети" : "§8Не в сети (ЛС)", winX + 39, rowY + 14, 0xFF888888);
         }
     }
 
@@ -456,33 +635,93 @@ public class AmarthaloeMenuScreen extends Screen {
         if (Minecraft.getInstance().player == null) return;
         PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
 
-        g.drawString(this.font, "ЛИЧНЫЕ СООБЩЕНИЯ (РАБОТАЮТ И В ОФФЛАЙНЕ)", winX + 12, winY + 10, 0xFFE0C068);
+        g.drawString(this.font, "МЕССЕНДЖЕР И ГРУППОВЫЕ ЧАТЫ", winX + 12, winY + 10, 0xFFE0C068);
         g.fill(winX + 104, winY + 24, winX + 105, winY + ySize - 24, 0xFF3A3A3A);
 
-        if (activeChatFriendUuid == null) {
-            g.drawString(this.font, "Добавьте друга, чтобы начать переписку.", winX + 115, winY + 40, 0xFF888888);
+        if (creatingGroupMode) {
+            g.drawString(this.font, "СОЗДАНИЕ ГРУППОВОГО ЧАТА", winX + 115, winY + 32, 0xFFE0C068);
+            g.drawString(this.font, "Введите название беседы и выберите аватарку:", winX + 115, winY + 44, 0xFFAAAAAA);
+            if (!pendingGroupAvatarId.isEmpty()) {
+                renderAvatarBox(g, pendingGroupAvatarId, winX + 195, winY + 142, 42, true);
+            }
             return;
         }
 
-        CompoundTag prof = data.knownProfiles.get(activeChatFriendUuid);
-        String chatPartnerName = prof != null ? prof.getString("rpName") : "Собеседник";
-        boolean online = prof != null && prof.getBoolean("online");
+        // Рисуем мини-аватарки (16x16) слева от кнопок контактов и бесед
+        List<String> contactIds = new ArrayList<>();
+        contactIds.addAll(data.groupChats.keySet());
+        contactIds.addAll(data.friends);
 
-        g.drawString(this.font, "Диалог: §e" + chatPartnerName + (online ? " §a(В сети)" : " §7(Не в сети — почта)"), winX + 110, winY + 26, 0xFFFFFFFF);
-        g.fill(winX + 108, winY + 38, winX + 332, winY + ySize - 48, 0xFF0B0B0B);
-        g.renderOutline(winX + 108, winY + 38, 224, ySize - 86, 0xFF2B2B2B);
+        for (int i = 0; i < Math.min(8, contactIds.size()); i++) {
+            String cId = contactIds.get(i);
+            String avaId = "";
+            if (cId.startsWith("group_")) {
+                CompoundTag gTag = data.groupChats.get(cId);
+                if (gTag != null) avaId = gTag.getString("avatarId");
+            } else {
+                CompoundTag prof = data.knownProfiles.get(cId);
+                if (prof != null) avaId = prof.getString("photoId");
+            }
+            renderAvatarBox(g, avaId, winX + 8, winY + 48 + i * 24, 16, true);
+        }
+
+        if (activeChatFriendUuid == null) {
+            g.drawString(this.font, "Выберите контакт или создайте беседу.", winX + 115, winY + 45, 0xFF888888);
+            return;
+        }
+
+        String headerTitle;
+        String headerAvatarId = "";
+        if (activeChatFriendUuid.startsWith("group_")) {
+            CompoundTag gTag = data.groupChats.get(activeChatFriendUuid);
+            headerTitle = gTag != null ? "§6Беседа: §e" + gTag.getString("title") : "Групповой чат";
+            if (gTag != null) headerAvatarId = gTag.getString("avatarId");
+        } else {
+            CompoundTag prof = data.knownProfiles.get(activeChatFriendUuid);
+            String chatPartnerName = prof != null ? prof.getString("rpName") : "Собеседник";
+            boolean online = prof != null && prof.getBoolean("online");
+            headerTitle = "§e" + chatPartnerName + (online ? " §a(В сети)" : " §7(Почта)");
+            if (prof != null) headerAvatarId = prof.getString("photoId");
+        }
+
+        renderAvatarBox(g, headerAvatarId, winX + 108, winY + 21, 16, true);
+        g.drawString(this.font, headerTitle, winX + 128, winY + 25, 0xFFFFFFFF);
+
+        g.fill(winX + 108, winY + 40, winX + 332, winY + ySize - 48, 0xFF0B0B0B);
+        g.renderOutline(winX + 108, winY + 40, 224, ySize - 88, 0xFF2B2B2B);
 
         List<String> history = PassportNetworking.CLIENT_DM_HISTORY.getOrDefault(activeChatFriendUuid, List.of());
-        int maxLines = 11;
-        int start = Math.max(0, history.size() - maxLines);
-        int msgY = winY + 44;
+        int start = Math.max(0, history.size() - 8);
+        int msgY = winY + 45;
 
         for (int i = start; i < history.size(); i++) {
-            List<FormattedCharSequence> wrapped = this.font.split(Component.literal(history.get(i)), 214);
-            for (FormattedCharSequence line : wrapped) {
-                if (msgY < winY + ySize - 56) {
-                    g.drawString(this.font, line, winX + 113, msgY, 0xFFFFFFFF);
-                    msgY += 11;
+            String raw = history.get(i);
+            // Если строка — отправленная фотография: "[IMG:imageId|SenderName]"
+            if (raw.startsWith("[IMG:") && raw.endsWith("]")) {
+                String inner = raw.substring(5, raw.length() - 1);
+                String[] parts = inner.split("\\|", 2);
+                String imgId = parts[0];
+                String senderName = parts.length > 1 ? parts[1] : "Игрок";
+
+                if (msgY + 46 < winY + ySize - 50) {
+                    g.drawString(this.font, "§e" + senderName + " §7прислал(а) фото §8(клик):", winX + 113, msgY, 0xFFFFFFFF);
+                    msgY += 10;
+                    g.fill(winX + 115, msgY, winX + 165, msgY + 34, 0xFF1A1A1A);
+                    if (ClientImageManager.drawImage(g, imgId, winX + 116, msgY + 1, 48, 32)) {
+                        clickableImages.add(new ClickableImageArea(winX + 115, msgY, 50, 34, imgId));
+                    } else {
+                        g.drawString(this.font, "Загрузка...", winX + 118, msgY + 12, 0xFF777777);
+                    }
+                    g.renderOutline(winX + 115, msgY, 50, 34, 0xFF8F7A42);
+                    msgY += 38;
+                }
+            } else {
+                List<FormattedCharSequence> wrapped = this.font.split(Component.literal(raw), 214);
+                for (FormattedCharSequence line : wrapped) {
+                    if (msgY < winY + ySize - 56) {
+                        g.drawString(this.font, line, winX + 113, msgY, 0xFFFFFFFF);
+                        msgY += 11;
+                    }
                 }
             }
         }
@@ -650,23 +889,11 @@ public class AmarthaloeMenuScreen extends Screen {
             g.drawString(this.font, "Статус: УТВЕРЖДЕН (Смена через администрацию)", winX + 12, winY + 20, 0xFF55FF55);
             g.fill(winX + 12, winY + 33, winX + 330, winY + 34, 0xFF8F7A42);
 
-            int y = winY + 44;
-            int step = 20;
-
-            drawPassportRow(g, "Имя персонажа:", data.rpName, winX + 15, y);
-            drawPassportRow(g, "Пол:", data.gender, winX + 190, y);
-
-            drawPassportRow(g, "Возраст / ДР:", data.ageAndBirth, winX + 15, y + step);
-            drawPassportRow(g, "Раса:", data.race, winX + 190, y + step);
-
-            drawPassportRow(g, "Рост / Вес:", data.heightWeight, winX + 15, y + step * 2);
-            drawPassportRow(g, "Волосы:", data.hair, winX + 190, y + step * 2);
-
-            drawPassportRow(g, "Глаза:", data.eyes, winX + 15, y + step * 3);
-            drawPassportRow(g, "Голос:", data.voice, winX + 190, y + step * 3);
-
-            drawPassportRow(g, "Особенности внешности:", data.features, winX + 15, y + step * 4 + 4);
-            drawPassportRow(g, "Дополнительно:", data.optional.isEmpty() ? "—" : data.optional, winX + 15, y + step * 5 + 8);
+            renderApprovedPassportSheet(g, winX, winY,
+                    data.rpName, data.gender, data.ageAndBirth,
+                    data.race, data.heightWeight, data.hair,
+                    data.eyes, data.features, data.voice,
+                    data.optional, data.photoId);
 
             g.fill(winX + 12, winY + 198, winX + 330, winY + 199, 0xFF3A3A3A);
             g.drawString(this.font, "Показать паспорт: /passport show <ник>", winX + 15, winY + 208, 0xFFE0C068);
@@ -675,7 +902,7 @@ public class AmarthaloeMenuScreen extends Screen {
 
     private void drawPassportRow(GuiGraphics g, String label, String value, int x, int y) {
         g.drawString(this.font, label, x, y, 0xFF888888);
-        int labelWidth = this.font.width(label) + 5;
+        int labelWidth = this.font.width(label) + 4;
         g.drawString(this.font, value.isEmpty() ? "Не указано" : value, x + labelWidth, y, 0xFFFFFFFF);
     }
 
