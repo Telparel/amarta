@@ -36,8 +36,8 @@ public class AmarthaloeMenuScreen extends Screen {
     // Друзья и Мессенджер
     private EditBox addFriendBox;
     private EditBox chatInputBox;
-    private String viewingFriendPassportUuid = null; // Если не null, показываем паспорт выбранного друга
-    private String activeChatFriendUuid = null;      // С кем открыт диалог во вкладке СООБЩЕНИЯ
+    private String viewingFriendPassportUuid = null;
+    private String activeChatFriendUuid = null;
     private int friendsPage = 0;
 
     public AmarthaloeMenuScreen() {
@@ -62,9 +62,16 @@ public class AmarthaloeMenuScreen extends Screen {
         int startX = leftPos + 8;
         int startY = topPos + 14;
 
+        int totalUnread = PassportNetworking.getTotalClientUnread();
+
         for (int i = 0; i < tabs.length; i++) {
             String tabName = tabs[i];
-            DarkButton btn = new DarkButton(startX, startY + (i * (btnHeight + 4)), btnWidth, btnHeight, Component.literal(tabName), (button) -> {
+            String displayTab = tabName;
+            if (tabName.equals("СООБЩЕНИЯ") && totalUnread > 0) {
+                displayTab = "СООБЩЕНИЯ §c[+" + totalUnread + "]";
+            }
+
+            DarkButton btn = new DarkButton(startX, startY + (i * (btnHeight + 4)), btnWidth, btnHeight, Component.literal(displayTab), (button) -> {
                 this.currentTab = tabName;
                 this.viewingFriendPassportUuid = null;
                 this.rebuildWidgets();
@@ -89,7 +96,6 @@ public class AmarthaloeMenuScreen extends Screen {
         int winX = leftPos + 110;
         int winY = topPos + 8;
 
-        // Если сейчас открыт просмотр паспорта друга — рисуем только кнопку «Назад к списку друзей»
         if (viewingFriendPassportUuid != null) {
             DarkButton backBtn = new DarkButton(winX + 14, winY + ySize - 44, 150, 20, Component.literal("◄ Назад к списку друзей"), (b) -> {
                 viewingFriendPassportUuid = null;
@@ -99,7 +105,6 @@ public class AmarthaloeMenuScreen extends Screen {
             return;
         }
 
-        // Поле ввода ника или РП-имени для добавления в друзья
         addFriendBox = createField(winX + 12, winY + 24, 210, 18, "", 40, "Введите ник или РП-имя...");
         DarkButton addBtn = new DarkButton(winX + 228, winY + 24, 102, 18, Component.literal("+ Добавить"), (b) -> {
             String val = addFriendBox.getValue().trim();
@@ -112,7 +117,6 @@ public class AmarthaloeMenuScreen extends Screen {
 
         int currentY = winY + 52;
 
-        // 1. Входящие заявки в друзья (показываем до 2 сверху, если есть)
         List<String> reqs = new ArrayList<>(data.incomingRequests);
         for (int i = 0; i < Math.min(2, reqs.size()); i++) {
             String reqUuid = reqs.get(i);
@@ -139,7 +143,6 @@ public class AmarthaloeMenuScreen extends Screen {
             currentY += 12;
         }
 
-        // 2. Список друзей с быстрыми кнопками: [Паспорт] [ЛС] [В группу] [✖]
         List<String> friendList = new ArrayList<>(data.friends);
         int perPage = 5;
         int startIdx = friendsPage * perPage;
@@ -148,22 +151,18 @@ public class AmarthaloeMenuScreen extends Screen {
             String fUuid = friendList.get(startIdx + i);
             int rowY = currentY + i * 32;
 
-            // Кнопка: Паспорт
             DarkButton passBtn = new DarkButton(winX + 142, rowY + 4, 54, 18, Component.literal("Паспорт"), (b) -> {
                 this.viewingFriendPassportUuid = fUuid;
                 this.rebuildWidgets();
             });
-            // Кнопка: Написать в ЛС
             DarkButton dmBtn = new DarkButton(winX + 199, rowY + 4, 34, 18, Component.literal("ЛС"), (b) -> {
                 this.activeChatFriendUuid = fUuid;
                 this.currentTab = "СООБЩЕНИЯ";
                 this.rebuildWidgets();
             });
-            // Кнопка: Пригласить в группу
             DarkButton partyBtn = new DarkButton(winX + 236, rowY + 4, 68, 18, Component.literal("+ В группу"), (b) -> {
                 PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("INVITE_PARTY", fUuid, ""));
             });
-            // Кнопка: Удалить
             DarkButton delBtn = new DarkButton(winX + 307, rowY + 4, 20, 18, Component.literal("✖"), (b) -> {
                 PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("REMOVE_FRIEND", fUuid, ""));
                 data.friends.remove(fUuid);
@@ -188,15 +187,25 @@ public class AmarthaloeMenuScreen extends Screen {
             activeChatFriendUuid = friendList.get(0);
         }
 
-        // Левая колонка контактов внутри вкладки СООБЩЕНИЯ
+        // Если мы открыли диалог с другом, у которого были непрочитанные сообщения — помечаем их прочитанными!
+        if (activeChatFriendUuid != null && PassportNetworking.CLIENT_UNREAD_COUNTS.getOrDefault(activeChatFriendUuid, 0) > 0) {
+            PassportNetworking.CLIENT_UNREAD_COUNTS.remove(activeChatFriendUuid);
+            PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("MARK_READ", activeChatFriendUuid, ""));
+        }
+
         for (int i = 0; i < Math.min(8, friendList.size()); i++) {
             String fUuid = friendList.get(i);
             CompoundTag prof = data.knownProfiles.get(fUuid);
             String name = prof != null ? prof.getString("rpName") : "Друг";
-            if (name.length() > 11) name = name.substring(0, 11) + ".";
+            int unread = PassportNetworking.CLIENT_UNREAD_COUNTS.getOrDefault(fUuid, 0);
+
+            if (name.length() > 9) name = name.substring(0, 9) + ".";
+            if (unread > 0) name = name + " §c+" + unread;
 
             DarkButton contactBtn = new DarkButton(winX + 10, winY + 28 + i * 24, 90, 20, Component.literal(name), (b) -> {
                 activeChatFriendUuid = fUuid;
+                PassportNetworking.CLIENT_UNREAD_COUNTS.remove(fUuid);
+                PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("MARK_READ", fUuid, ""));
                 this.rebuildWidgets();
             });
             contactBtn.setSelected(fUuid.equals(activeChatFriendUuid));
@@ -204,7 +213,7 @@ public class AmarthaloeMenuScreen extends Screen {
         }
 
         if (activeChatFriendUuid != null) {
-            chatInputBox = createField(winX + 108, winY + ySize - 42, 165, 18, "", 120, "Написать сообщение...");
+            chatInputBox = createField(winX + 108, winY + ySize - 42, 165, 18, "", 120, "Сообщение (даже в оффлайн)...");
             DarkButton sendBtn = new DarkButton(winX + 277, winY + ySize - 42, 55, 18, Component.literal("Отпр."), (b) -> {
                 String msg = chatInputBox.getValue().trim();
                 if (!msg.isEmpty()) {
@@ -370,7 +379,6 @@ public class AmarthaloeMenuScreen extends Screen {
         if (Minecraft.getInstance().player == null) return;
         PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
 
-        // Режим просмотра паспорта выбранного друга
         if (viewingFriendPassportUuid != null) {
             CompoundTag prof = data.knownProfiles.get(viewingFriendPassportUuid);
             g.drawString(this.font, "ПАСПОРТ ДРУГА", winX + 14, winY + 10, 0xFFE0C068);
@@ -438,10 +446,9 @@ public class AmarthaloeMenuScreen extends Screen {
             g.fill(winX + 12, rowY, winX + 330, rowY + 26, 0xFF151515);
             g.renderOutline(winX + 12, rowY, 318, 26, online ? 0xFF2E5A2E : 0xFF2B2B2B);
 
-            // Индикатор сети + Имя
             String statusDot = online ? "§a● " : "§7○ ";
             g.drawString(this.font, statusDot + "§f" + rpName, winX + 18, rowY + 4, 0xFFFFFFFF);
-            g.drawString(this.font, (online ? "§aВ сети" : "§8Не в сети") + (username.isEmpty() ? "" : " §8(" + username + ")"), winX + 18, rowY + 14, 0xFF888888);
+            g.drawString(this.font, (online ? "§aВ сети" : "§8Не в сети (ЛС доступно)") + (username.isEmpty() ? "" : " §8(" + username + ")"), winX + 18, rowY + 14, 0xFF888888);
         }
     }
 
@@ -449,7 +456,7 @@ public class AmarthaloeMenuScreen extends Screen {
         if (Minecraft.getInstance().player == null) return;
         PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
 
-        g.drawString(this.font, "ЛИЧНЫЕ СООБЩЕНИЯ (МЕССЕНДЖЕР)", winX + 12, winY + 10, 0xFFE0C068);
+        g.drawString(this.font, "ЛИЧНЫЕ СООБЩЕНИЯ (РАБОТАЮТ И В ОФФЛАЙНЕ)", winX + 12, winY + 10, 0xFFE0C068);
         g.fill(winX + 104, winY + 24, winX + 105, winY + ySize - 24, 0xFF3A3A3A);
 
         if (activeChatFriendUuid == null) {
@@ -461,7 +468,7 @@ public class AmarthaloeMenuScreen extends Screen {
         String chatPartnerName = prof != null ? prof.getString("rpName") : "Собеседник";
         boolean online = prof != null && prof.getBoolean("online");
 
-        g.drawString(this.font, "Диалог: §e" + chatPartnerName + (online ? " §a(В сети)" : " §7(Не в сети)"), winX + 110, winY + 26, 0xFFFFFFFF);
+        g.drawString(this.font, "Диалог: §e" + chatPartnerName + (online ? " §a(В сети)" : " §7(Не в сети — почта)"), winX + 110, winY + 26, 0xFFFFFFFF);
         g.fill(winX + 108, winY + 38, winX + 332, winY + ySize - 48, 0xFF0B0B0B);
         g.renderOutline(winX + 108, winY + 38, 224, ySize - 86, 0xFF2B2B2B);
 
@@ -640,7 +647,7 @@ public class AmarthaloeMenuScreen extends Screen {
             g.drawString(this.font, "Особенности внешности:", col1X, labelY + stepY * 4, 0xFFBBBBBB);
             g.drawString(this.font, "Дополнительно (по желанию):", col1X, labelY + stepY * 5, 0xFFBBBBBB);
         } else {
-            g.drawString(this.font, "Статус: УТВЕРЖЕН (Смена через администрацию)", winX + 12, winY + 20, 0xFF55FF55);
+            g.drawString(this.font, "Статус: УТВЕРЖДЕН (Смена через администрацию)", winX + 12, winY + 20, 0xFF55FF55);
             g.fill(winX + 12, winY + 33, winX + 330, winY + 34, 0xFF8F7A42);
 
             int y = winY + 44;
