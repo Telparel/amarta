@@ -26,7 +26,7 @@ import java.util.*;
 @EventBusSubscriber(modid = "amarthaloe", bus = EventBusSubscriber.Bus.MOD)
 public class PassportNetworking {
 
-    public static final int CHUNK_SIZE = 24000; // 24 КБ на 1 пакет для безопасной передачи до 2 МБ
+    public static final int CHUNK_SIZE = 24000;
     public static final Map<String, List<String>> CLIENT_DM_HISTORY = new HashMap<>();
     public static final Map<String, Integer> CLIENT_UNREAD_COUNTS = new HashMap<>();
     private static final Map<String, byte[][]> SERVER_INCOMING_CHUNKS = new HashMap<>();
@@ -137,7 +137,7 @@ public class PassportNetworking {
                                 current.isLocked = true;
 
                                 serverPlayer.setData(PassportData.PASSPORT, current);
-                                serverPlayer.refreshDisplayName();
+                                ServerEvents.refreshAllNames(serverPlayer);
 
                                 ServerEvents.syncPlayerDataWithOnlineStatus(serverPlayer);
                                 serverPlayer.sendSystemMessage(Component.literal("§6[Исономия] §aВаш паспорт и фотография зарегистрированы в реестре Либры!"));
@@ -163,7 +163,7 @@ public class PassportNetworking {
                                 data.activeTitleFaction = f.id;
                             }
                             sp.setData(PassportData.PASSPORT, data);
-                            sp.refreshDisplayName();
+                            ServerEvents.refreshAllNames(sp);
                             ServerEvents.syncPlayerDataWithOnlineStatus(sp);
                         }
                     });
@@ -241,7 +241,6 @@ public class PassportNetworking {
                 }
             }
             case "CREATE_GROUP" -> {
-                // targetStr = Название группы, extra = imageId аватарки
                 String groupId = "group_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
                 OfflineMailStorage.GroupChatInfo group = new OfflineMailStorage.GroupChatInfo();
                 group.groupId = groupId;
@@ -258,7 +257,6 @@ public class PassportNetworking {
                 sender.sendSystemMessage(Component.literal("§6[Мессенджер] §aГрупповой чат «§e" + group.title + "§a» успешно создан!"));
             }
             case "ADD_GROUP_MEMBER" -> {
-                // targetStr = groupId, extra = ник или РП-имя приглашаемого игрока
                 OfflineMailStorage.GroupChatInfo group = mail.getGroupChats().get(targetStr);
                 if (group == null || !group.members.contains(senderUuid)) return;
 
@@ -330,8 +328,8 @@ public class PassportNetworking {
                         PassportData otherData = other.getData(PassportData.PASSPORT);
                         otherData.friends.add(senderUuid);
                         otherData.incomingRequests.remove(senderUuid);
-                        otherData.knownProfiles.put(senderUuid, senderData.toProfileSnapshot(senderUuid, sender.getName().getString(), true));
-                        senderData.knownProfiles.put(targetStr, otherData.toProfileSnapshot(targetStr, other.getName().getString(), true));
+                        otherData.knownProfiles.put(senderUuid, otherData.toProfileSnapshot(senderUuid, sender.getName().getString(), true));
+                        otherData.knownProfiles.put(targetStr, otherData.toProfileSnapshot(targetStr, other.getName().getString(), true));
                         other.setData(PassportData.PASSPORT, otherData);
                         other.sendSystemMessage(Component.literal("§6[Друзья] §a" + senderName + " принял(а) ваш запрос в друзья!"));
                         other.playNotifySound(SoundEvents.PLAYER_LEVELUP, SoundSource.MASTER, 0.6f, 1.3f);
@@ -386,12 +384,10 @@ public class PassportNetworking {
                 PacketDistributor.sendToPlayer(sender, new SocialActionPayload("SET_UNREAD", targetStr, "0"));
             }
             case "SEND_DM" -> {
-                // Проверяем, является ли сообщение фотографией: "[IMG:img_12345]"
                 String sharedLine = extra.startsWith("[IMG:")
                         ? "[IMG:" + extra.substring(5, extra.length() - 1) + "|" + senderName + "]"
                         : "§e" + senderName + ": §f" + extra;
 
-                // 1. Отправка в ГРУППОВОЙ ЧАТ
                 if (targetStr.startsWith("group_")) {
                     OfflineMailStorage.GroupChatInfo group = mail.getGroupChats().get(targetStr);
                     if (group == null || !group.members.contains(senderUuid)) return;
@@ -418,7 +414,6 @@ public class PassportNetworking {
                     return;
                 }
 
-                // 2. Отправка ТЕСТОВОМУ БОТУ
                 if (targetStr.startsWith("bot-")) {
                     CompoundTag botProf = senderData.knownProfiles.get(targetStr);
                     String botName = botProf != null ? botProf.getString("rpName") : "Житель Исономии";
@@ -441,7 +436,6 @@ public class PassportNetworking {
                     return;
                 }
 
-                // 3. Отправка ЖИВОМУ ИГРОКУ (Онлайн или Оффлайн)
                 ServerPlayer other = sender.server.getPlayerList().getPlayer(UUID.fromString(targetStr));
                 boolean isOnline = (other != null);
 
