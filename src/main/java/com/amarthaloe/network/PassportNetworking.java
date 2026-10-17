@@ -1,5 +1,6 @@
 package com.amarthaloe.network;
 
+import com.amarthaloe.client.ClientImageManager;
 import com.amarthaloe.data.OfflineMailStorage;
 import com.amarthaloe.data.PassportData;
 import com.amarthaloe.events.ServerEvents;
@@ -25,9 +26,10 @@ import java.util.*;
 @EventBusSubscriber(modid = "amarthaloe", bus = EventBusSubscriber.Bus.MOD)
 public class PassportNetworking {
 
-    // Клиентский кэш истории диалогов и непрочитанных сообщений
+    public static final int CHUNK_SIZE = 24000; // 24 КБ на 1 пакет для безопасной передачи до 2 МБ
     public static final Map<String, List<String>> CLIENT_DM_HISTORY = new HashMap<>();
     public static final Map<String, Integer> CLIENT_UNREAD_COUNTS = new HashMap<>();
+    private static final Map<String, byte[][]> SERVER_INCOMING_CHUNKS = new HashMap<>();
 
     public static void addClientMessage(String partnerUuid, String formattedLine) {
         CLIENT_DM_HISTORY.computeIfAbsent(partnerUuid, k -> new ArrayList<>()).add(formattedLine);
@@ -39,6 +41,26 @@ public class PassportNetworking {
         return total;
     }
 
+    public static void sendImageInChunksToServer(String imageId, byte[] bytes) {
+        int totalChunks = (int) Math.ceil((double) bytes.length / CHUNK_SIZE);
+        for (int i = 0; i < totalChunks; i++) {
+            int start = i * CHUNK_SIZE;
+            int end = Math.min(bytes.length, start + CHUNK_SIZE);
+            byte[] slice = Arrays.copyOfRange(bytes, start, end);
+            PacketDistributor.sendToServer(new ImageChunkPayload(imageId, i, totalChunks, slice));
+        }
+    }
+
+    public static void sendImageInChunksToPlayer(ServerPlayer player, String imageId, byte[] bytes) {
+        int totalChunks = (int) Math.ceil((double) bytes.length / CHUNK_SIZE);
+        for (int i = 0; i < totalChunks; i++) {
+            int start = i * CHUNK_SIZE;
+            int end = Math.min(bytes.length, start + CHUNK_SIZE);
+            byte[] slice = Arrays.copyOfRange(bytes, start, end);
+            PacketDistributor.sendToPlayer(player, new ImageChunkPayload(imageId, i, totalChunks, slice));
+        }
+    }
+
     public record PassportPayload(CompoundTag tag) implements CustomPacketPayload {
         public static final Type<PassportPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("amarthaloe", "passport_sync"));
         public static final StreamCodec<FriendlyByteBuf, PassportPayload> STREAM_CODEC = StreamCodec.composite(
@@ -47,9 +69,7 @@ public class PassportNetworking {
         );
 
         @Override
-        public Type<? extends CustomPacketPayload> type() {
-            return TYPE;
-        }
+        public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
     public record SelectTitlePayload(String factionId) implements CustomPacketPayload {
@@ -60,9 +80,7 @@ public class PassportNetworking {
         );
 
         @Override
-        public Type<? extends CustomPacketPayload> type() {
-            return TYPE;
-        }
+        public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
     public record SocialActionPayload(String action, String target, String extra) implements CustomPacketPayload {
@@ -75,9 +93,21 @@ public class PassportNetworking {
         );
 
         @Override
-        public Type<? extends CustomPacketPayload> type() {
-            return TYPE;
-        }
+        public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+
+    public record ImageChunkPayload(String imageId, int chunkIdx, int totalChunks, byte[] data) implements CustomPacketPayload {
+        public static final Type<ImageChunkPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("amarthaloe", "image_chunk"));
+        public static final StreamCodec<FriendlyByteBuf, ImageChunkPayload> STREAM_CODEC = StreamCodec.composite(
+                ByteBufCodecs.STRING_UTF8, ImageChunkPayload::imageId,
+                ByteBufCodecs.VAR_INT, ImageChunkPayload::chunkIdx,
+                ByteBufCodecs.VAR_INT, ImageChunkPayload::totalChunks,
+                ByteBufCodecs.BYTE_ARRAY, ImageChunkPayload::data,
+                ImageChunkPayload::new
+        );
+
+        @Override
+        public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
     @SubscribeEvent
@@ -103,13 +133,14 @@ public class PassportNetworking {
                                 current.features = incoming.getString("features");
                                 current.voice = incoming.getString("voice");
                                 current.optional = incoming.getString("optional");
+                                current.photoId = incoming.getString("photoId");
                                 current.isLocked = true;
 
                                 serverPlayer.setData(PassportData.PASSPORT, current);
                                 serverPlayer.refreshDisplayName();
 
                                 ServerEvents.syncPlayerDataWithOnlineStatus(serverPlayer);
-                                serverPlayer.sendSystemMessage(Component.literal("§6[Исономия] §aВаш паспорт зарегистрирован в реестре Либры!"));
+                                serverPlayer.sendSystemMessage(Component.literal("§6[Исономия] §aВаш паспорт и фотография зарегистрированы в реестре Либры!"));
                             }
                         } else if (context.flow().isClientbound()) {
                             context.player().getData(PassportData.PASSPORT).deserializeNBT(context.player().registryAccess(), payload.tag());
@@ -134,6 +165,38 @@ public class PassportNetworking {
                             sp.setData(PassportData.PASSPORT, data);
                             sp.refreshDisplayName();
                             ServerEvents.syncPlayerDataWithOnlineStatus(sp);
+                        }
+                    });
+                }
+        );
+
+        registrar.playBidirectional(
+                ImageChunkPayload.TYPE,
+                ImageChunkPayload.STREAM_CODEC,
+                (payload, context) -> {
+                    context.enqueueWork(() -> {
+                        if (context.flow().isServerbound() && context.player() instanceof ServerPlayer sp) {
+                            if (payload.totalChunks() <= 0 || payload.totalChunks() > 120) return;
+                            String key = sp.getStringUUID() + "_" + payload.imageId();
+                            byte[][] chunks = SERVER_INCOMING_CHUNKS.computeIfAbsent(key, k -> new byte[payload.totalChunks()][]);
+                            if (payload.chunkIdx() >= 0 && payload.chunkIdx() < chunks.length) {
+                                chunks[payload.chunkIdx()] = payload.data();
+                            }
+                            for (byte[] c : chunks) {
+                                if (c == null) return;
+                            }
+                            SERVER_INCOMING_CHUNKS.remove(key);
+                            int len = 0;
+                            for (byte[] c : chunks) len += c.length;
+                            byte[] full = new byte[len];
+                            int pos = 0;
+                            for (byte[] c : chunks) {
+                                System.arraycopy(c, 0, full, pos, c.length);
+                                pos += c.length;
+                            }
+                            OfflineMailStorage.get(sp.server).saveImage(payload.imageId(), full);
+                        } else if (context.flow().isClientbound()) {
+                            ClientImageManager.receiveChunkFromServer(payload.imageId(), payload.chunkIdx(), payload.totalChunks(), payload.data());
                         }
                     });
                 }
@@ -171,6 +234,60 @@ public class PassportNetworking {
         OfflineMailStorage mail = OfflineMailStorage.get(sender.server);
 
         switch (action) {
+            case "REQUEST_IMAGE" -> {
+                byte[] imgBytes = mail.getImage(targetStr);
+                if (imgBytes != null) {
+                    sendImageInChunksToPlayer(sender, targetStr, imgBytes);
+                }
+            }
+            case "CREATE_GROUP" -> {
+                // targetStr = Название группы, extra = imageId аватарки
+                String groupId = "group_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+                OfflineMailStorage.GroupChatInfo group = new OfflineMailStorage.GroupChatInfo();
+                group.groupId = groupId;
+                group.title = targetStr.trim().isEmpty() ? "Беседа Исономии" : targetStr.trim();
+                group.avatarId = extra;
+                group.ownerUuid = senderUuid;
+                group.members.add(senderUuid);
+
+                mail.createOrUpdateGroup(group);
+                mail.addMessage(groupId, groupId, "§8[Система] §7Создана группа «" + group.title + "»", true);
+
+                ServerEvents.syncPlayerDataWithOnlineStatus(sender);
+                ServerEvents.syncMailAndNotifyUnread(sender);
+                sender.sendSystemMessage(Component.literal("§6[Мессенджер] §aГрупповой чат «§e" + group.title + "§a» успешно создан!"));
+            }
+            case "ADD_GROUP_MEMBER" -> {
+                // targetStr = groupId, extra = ник или РП-имя приглашаемого игрока
+                OfflineMailStorage.GroupChatInfo group = mail.getGroupChats().get(targetStr);
+                if (group == null || !group.members.contains(senderUuid)) return;
+
+                ServerPlayer found = findPlayerByNameOrRpName(sender, extra);
+                if (found == null) {
+                    sender.sendSystemMessage(Component.literal("§c[Беседа] Игрок «" + extra + "» не найден в сети."));
+                    return;
+                }
+                String newMemberUuid = found.getStringUUID();
+                group.members.add(newMemberUuid);
+                mail.createOrUpdateGroup(group);
+
+                PassportData fData = found.getData(PassportData.PASSPORT);
+                String fName = fData.rpName.isEmpty() ? found.getName().getString() : fData.rpName;
+                String sysLine = "§8[Беседа] §e" + senderName + " §7добавил(а) §e" + fName;
+                mail.addMessage(targetStr, targetStr, sysLine, true);
+
+                for (String memberUuid : group.members) {
+                    if (memberUuid.startsWith("bot-")) continue;
+                    try {
+                        ServerPlayer mPlayer = sender.server.getPlayerList().getPlayer(UUID.fromString(memberUuid));
+                        if (mPlayer != null) {
+                            ServerEvents.syncPlayerDataWithOnlineStatus(mPlayer);
+                            PacketDistributor.sendToPlayer(mPlayer, new SocialActionPayload("RECEIVE_DM", targetStr, sysLine));
+                        }
+                    } catch (Exception ignored) {}
+                }
+                found.sendSystemMessage(Component.literal("§6[Мессенджер] §e" + senderName + " §aдобавил(а) вас в групповой чат «§e" + group.title + "§a»!"));
+            }
             case "ADD_FRIEND" -> {
                 ServerPlayer found = findPlayerByNameOrRpName(sender, targetStr);
                 if (found == null) {
@@ -178,7 +295,7 @@ public class PassportNetworking {
                     return;
                 }
                 if (found.getUUID().equals(sender.getUUID())) {
-                    sender.sendSystemMessage(Component.literal("§c[Друзья] Нельзя добавить самого себя! (Для теста используй /socialtest request)"));
+                    sender.sendSystemMessage(Component.literal("§c[Друзья] Нельзя добавить самого себя!"));
                     return;
                 }
                 String targetUuid = found.getStringUUID();
@@ -269,9 +386,39 @@ public class PassportNetworking {
                 PacketDistributor.sendToPlayer(sender, new SocialActionPayload("SET_UNREAD", targetStr, "0"));
             }
             case "SEND_DM" -> {
-                String sharedLine = "§e" + senderName + ": §f" + extra;
+                // Проверяем, является ли сообщение фотографией: "[IMG:img_12345]"
+                String sharedLine = extra.startsWith("[IMG:")
+                        ? "[IMG:" + extra.substring(5, extra.length() - 1) + "|" + senderName + "]"
+                        : "§e" + senderName + ": §f" + extra;
 
-                // Если это тестовый бот
+                // 1. Отправка в ГРУППОВОЙ ЧАТ
+                if (targetStr.startsWith("group_")) {
+                    OfflineMailStorage.GroupChatInfo group = mail.getGroupChats().get(targetStr);
+                    if (group == null || !group.members.contains(senderUuid)) return;
+
+                    mail.addMessage(targetStr, targetStr, sharedLine, true);
+                    for (String memberUuid : group.members) {
+                        if (memberUuid.startsWith("bot-")) continue;
+                        try {
+                            ServerPlayer mPlayer = sender.server.getPlayerList().getPlayer(UUID.fromString(memberUuid));
+                            if (mPlayer != null) {
+                                PacketDistributor.sendToPlayer(mPlayer, new SocialActionPayload("RECEIVE_DM", targetStr, sharedLine));
+                                if (!memberUuid.equals(senderUuid)) {
+                                    mail.incrementUnread(memberUuid, targetStr);
+                                    int unread = mail.getUnreadForPlayer(memberUuid).getOrDefault(targetStr, 0);
+                                    PacketDistributor.sendToPlayer(mPlayer, new SocialActionPayload("SET_UNREAD", targetStr, String.valueOf(unread)));
+                                    mPlayer.sendSystemMessage(Component.literal("§6[Беседа «§e" + group.title + "§6»] §e" + senderName + ": §f" + (extra.startsWith("[IMG:") ? "[Фотография]" : extra)));
+                                    mPlayer.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.6f, 1.5f);
+                                }
+                            } else if (!memberUuid.equals(senderUuid)) {
+                                mail.incrementUnread(memberUuid, targetStr);
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                    return;
+                }
+
+                // 2. Отправка ТЕСТОВОМУ БОТУ
                 if (targetStr.startsWith("bot-")) {
                     CompoundTag botProf = senderData.knownProfiles.get(targetStr);
                     String botName = botProf != null ? botProf.getString("rpName") : "Житель Исономии";
@@ -281,30 +428,32 @@ public class PassportNetworking {
                     PacketDistributor.sendToPlayer(sender, new SocialActionPayload("RECEIVE_DM", targetStr, sharedLine));
 
                     if (botOnline) {
-                        String reply = "§e" + botName + ": §fПринято к сведению, гражданин! Норма пайка выполнена.";
+                        String reply = extra.startsWith("[IMG:")
+                                ? "§e" + botName + ": §fОтличный снимок, товарищ! Прикрепим к архивному делу."
+                                : "§e" + botName + ": §fПринято к сведению, гражданин! Норма пайка выполнена.";
                         mail.addMessage(targetStr, senderUuid, reply, true);
                         PacketDistributor.sendToPlayer(sender, new SocialActionPayload("RECEIVE_DM", targetStr, reply));
-                        sender.sendSystemMessage(Component.literal("§6[ЛС от §e" + botName + "§6] §fПринято к сведению, гражданин! Норма пайка выполнена."));
+                        sender.sendSystemMessage(Component.literal("§6[ЛС от §e" + botName + "§6] §f" + (extra.startsWith("[IMG:") ? "Отличный снимок, товарищ!" : "Принято к сведению, гражданин!")));
                         sender.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.6f, 1.5f);
                     } else {
-                        sender.sendSystemMessage(Component.literal("§6[Почта Исономии] §7" + botName + " сейчас не в сети. Ваше сообщение сохранено и будет доставлено при входе!"));
-                        sender.playNotifySound(SoundEvents.BOOK_PAGE_TURN, SoundSource.MASTER, 0.8f, 1.2f);
+                        sender.sendSystemMessage(Component.literal("§6[Почта Исономии] §7" + botName + " сейчас не в сети. Сообщение сохранено и дойдет при входе!"));
                     }
                     return;
                 }
 
+                // 3. Отправка ЖИВОМУ ИГРОКУ (Онлайн или Оффлайн)
                 ServerPlayer other = sender.server.getPlayerList().getPlayer(UUID.fromString(targetStr));
                 boolean isOnline = (other != null);
 
-                // Сохраняем сообщение в серверную базу данных (и для онлайна, и для оффлайна!)
                 mail.addMessage(senderUuid, targetStr, sharedLine, isOnline);
                 PacketDistributor.sendToPlayer(sender, new SocialActionPayload("RECEIVE_DM", targetStr, sharedLine));
 
                 if (isOnline) {
                     PacketDistributor.sendToPlayer(other, new SocialActionPayload("RECEIVE_DM", senderUuid, sharedLine));
-                    int unread = mail.getUnreadForPlayer(targetStr).getOrDefault(senderUuid, 0) + 1;
+                    mail.incrementUnread(targetStr, senderUuid);
+                    int unread = mail.getUnreadForPlayer(targetStr).getOrDefault(senderUuid, 0);
                     PacketDistributor.sendToPlayer(other, new SocialActionPayload("SET_UNREAD", senderUuid, String.valueOf(unread)));
-                    other.sendSystemMessage(Component.literal("§6[ЛС от §e" + senderName + "§6] §f" + extra));
+                    other.sendSystemMessage(Component.literal("§6[ЛС от §e" + senderName + "§6] §f" + (extra.startsWith("[IMG:") ? "§b[Прислана фотография]" : extra)));
                     other.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.6f, 1.5f);
                 } else {
                     CompoundTag targetProf = senderData.knownProfiles.get(targetStr);
