@@ -15,8 +15,6 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
-import net.minecraft.world.SimpleMenuProvider;
-import net.minecraft.world.inventory.ChestMenu;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.network.PacketDistributor;
@@ -32,9 +30,9 @@ public class PassportNetworking {
     public static final Map<String, List<String>> CLIENT_DM_HISTORY = new HashMap<>();
     public static final Map<String, Integer> CLIENT_UNREAD_COUNTS = new HashMap<>();
 
-    // Клиентские данные текущей Группы (для меню и WoW HUD) и Содружества
     public static CompoundTag CLIENT_PARTY_DATA = new CompoundTag();
     public static CompoundTag CLIENT_GUILD_DATA = new CompoundTag();
+    public static CompoundTag CLIENT_BOARD_DATA = new CompoundTag(); // Свитки и листовки на доске
 
     private static final Map<String, byte[][]> SERVER_INCOMING_CHUNKS = new HashMap<>();
 
@@ -227,6 +225,9 @@ public class PassportNetworking {
                         if (!payload.guildTag().getBoolean("ignoreGuild")) {
                             CLIENT_GUILD_DATA = payload.guildTag();
                         }
+                        if (payload.guildTag().contains("boardNotices")) {
+                            CLIENT_BOARD_DATA = payload.guildTag();
+                        }
                     });
                 }
         );
@@ -390,7 +391,7 @@ public class PassportNetworking {
                 ServerEvents.syncPlayerDataWithOnlineStatus(sender);
             }
 
-            // --- СИСТЕМА ГРУПП (ЛИМИТ 5 ЧЕЛОВЕК) ---
+            // --- СИСТЕМА ГРУПП ---
             case "INVITE_PARTY" -> ServerEvents.handlePartyInvite(sender, targetStr);
             case "PARTY_ACCEPT" -> ServerEvents.handlePartyAccept(sender, targetStr);
             case "PARTY_DECLINE" -> ServerEvents.handlePartyDecline(sender);
@@ -398,7 +399,7 @@ public class PassportNetworking {
             case "PARTY_KICK" -> ServerEvents.handlePartyLeaveOrKick(sender, targetStr);
             case "PARTY_LEAVE" -> ServerEvents.handlePartyLeaveOrKick(sender, senderUuid);
 
-            // --- СИСТЕМА СОДРУЖЕСТВ (КЛАНОВ) ---
+            // --- СИСТЕМА СОДРУЖЕСТВ ---
             case "GUILD_CREATE" -> ServerEvents.handleGuildCreate(sender, targetStr, extra);
             case "GUILD_INVITE" -> ServerEvents.handleGuildInvite(sender, targetStr);
             case "GUILD_ACCEPT" -> ServerEvents.handleGuildAccept(sender, targetStr);
@@ -409,6 +410,12 @@ public class PassportNetworking {
             case "GUILD_OPEN_CHEST" -> ServerEvents.handleGuildOpenChest(sender);
             case "GUILD_KICK" -> ServerEvents.handleGuildKickOrLeave(sender, targetStr);
             case "GUILD_LEAVE" -> ServerEvents.handleGuildKickOrLeave(sender, senderUuid);
+
+            // --- ДОСКА ОБЪЯВЛЕНИЙ И КОНТРАКТОВ ---
+            case "BOARD_ACCEPT_QUEST" -> ServerEvents.handleBoardAcceptQuest(sender, targetStr);
+            case "BOARD_COMPLETE_QUEST" -> ServerEvents.handleBoardCompleteQuest(sender, targetStr);
+            case "BOARD_POST_NOTE" -> ServerEvents.handleBoardPostNote(sender, targetStr, extra);
+            case "BOARD_REMOVE_NOTE" -> ServerEvents.handleBoardRemoveNote(sender, targetStr);
 
             case "MARK_READ" -> {
                 mail.markAsRead(senderUuid, targetStr);
