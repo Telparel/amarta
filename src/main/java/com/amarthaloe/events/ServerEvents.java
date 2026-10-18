@@ -10,6 +10,7 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.commands.arguments.EntityArgument;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -29,6 +30,7 @@ import net.minecraft.world.inventory.ChestMenu;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.CustomData;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -203,6 +205,51 @@ public class ServerEvents {
         }
     }
 
+    // --- УСТАНОВКА НАЙДЕННОЙ ЛОРНОЙ КНИГИ ИЗ ИНВЕНТАРЯ НА ПОЛКУ ---
+    public static void handleShelfInsertBook(ServerPlayer player) {
+        PassportData data = player.getData(PassportData.PASSPORT);
+        boolean foundAny = false;
+
+        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+            ItemStack st = player.getInventory().getItem(i);
+            if (st.isEmpty()) continue;
+
+            CustomData customData = st.get(DataComponents.CUSTOM_DATA);
+            if (customData != null) {
+                CompoundTag tag = customData.copyTag();
+                if (tag.contains("amarthaloe_lore_book")) {
+                    String bookId = tag.getString("amarthaloe_lore_book");
+                    LoreBookRegistry.LoreBook book = LoreBookRegistry.byId(bookId);
+                    if (book != null && !data.unlockedBooks.contains(bookId)) {
+                        data.unlockedBooks.add(bookId);
+                        st.shrink(1);
+                        foundAny = true;
+                        player.sendSystemMessage(Component.literal("§6[Архив Либры] §aВы поставили редкий том «§e" + book.fullTitle() + "§a» на свою книжную полку!"));
+                        player.playNotifySound(SoundEvents.BOOK_PUT, SoundSource.MASTER, 1.0f, 1.0f);
+                    }
+                }
+            }
+        }
+
+        if (foundAny) {
+            player.setData(PassportData.PASSPORT, data);
+            syncPlayerDataWithOnlineStatus(player);
+        } else {
+            player.sendSystemMessage(Component.literal("§c[Архив Либры] В вашем инвентаре нет новых запечатанных томов для книжной полки."));
+        }
+    }
+
+    // Создает физический предмет лорной книги в инвентарь игрока
+    public static ItemStack createLoreBookItem(LoreBookRegistry.LoreBook book) {
+        ItemStack stack = new ItemStack(Items.ENCHANTED_BOOK);
+        stack.set(DataComponents.CUSTOM_NAME, Component.literal("§6📖 Запечатанный Том: §e" + book.spineTitle()));
+        CompoundTag customTag = new CompoundTag();
+        customTag.putString("amarthaloe_lore_book", book.id());
+        stack.set(DataComponents.CUSTOM_DATA, CustomData.of(customTag));
+        return stack;
+    }
+
+    // --- ОБРАБОТЧИКИ ДОСКИ ОБЪЯВЛЕНИЙ И КОНТРАКТОВ ---
     public static void handleBoardAcceptQuest(ServerPlayer player, String questId) {
         OfflineMailStorage mail = OfflineMailStorage.get(player.server);
         OfflineMailStorage.BoardNotice q = mail.getBoardNotices().get(questId);
@@ -261,13 +308,14 @@ public class ServerEvents {
         data.activeQuests.remove(questId);
         data.nomes += q.rewardNomes;
 
-        // Если к заказу привязана секретная лорная книга — ставим её на книжную полку игрока!
+        // Если за этот контракт полагается секретная лорная книга — ставим её на полку игрока!
         if (q.rewardBookId != null && !q.rewardBookId.isEmpty()) {
-            data.unlockedBooks.add(q.rewardBookId);
-            LoreBookRegistry.LoreBook lb = LoreBookRegistry.byId(q.rewardBookId);
-            String bookName = lb != null ? lb.spineTitle() : q.rewardBookId;
-            player.sendSystemMessage(Component.literal("§d§l📖 [Вавилонская Библиотека] §eВы добыли редкий том «§6" + bookName + "§e»! Он поставлен на вашу книжную полку во вкладке §bИНФОРМАЦИЯ§e."));
-            player.playNotifySound(SoundEvents.ENCHANTMENT_TABLE_USE, SoundSource.MASTER, 1.0f, 1.1f);
+            LoreBookRegistry.LoreBook unlockedBook = LoreBookRegistry.byId(q.rewardBookId);
+            if (unlockedBook != null && !data.unlockedBooks.contains(q.rewardBookId)) {
+                data.unlockedBooks.add(q.rewardBookId);
+                player.sendSystemMessage(Component.literal("§d📖 [Архив Либры] §fВы добыли тайный том «§e" + unlockedBook.fullTitle() + "§f»! Теперь он стоит на вашей полке во вкладке §bИНФОРМАЦИЯ§f."));
+                player.playNotifySound(SoundEvents.UI_TOAST_CHALLENGE_COMPLETE, SoundSource.MASTER, 0.9f, 1.25f);
+            }
         }
 
         player.setData(PassportData.PASSPORT, data);
@@ -984,55 +1032,6 @@ public class ServerEvents {
 
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
-        // Команда выдачи секретных лорных книг на полку игрока: /lore unlock|lock <игрок> <id_книги|all>
-        event.getDispatcher().register(
-            Commands.literal("lore")
-                .requires(source -> source.hasPermission(2))
-                .then(Commands.literal("unlock")
-                    .then(Commands.argument("target", EntityArgument.player())
-                        .then(Commands.argument("bookId", StringArgumentType.word())
-                            .suggests((ctx, builder) -> {
-                                List<String> ids = new ArrayList<>();
-                                ids.add("all");
-                                for (LoreBookRegistry.LoreBook b : LoreBookRegistry.BOOKS) {
-                                    if (b.secretByDefault()) ids.add(b.id());
-                                }
-                                return SharedSuggestionProvider.suggest(ids, builder);
-                            })
-                            .executes(ctx -> {
-                                ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-                                String bookId = StringArgumentType.getString(ctx, "bookId");
-                                PassportData d = target.getData(PassportData.PASSPORT);
-
-                                if ("all".equalsIgnoreCase(bookId)) {
-                                    for (LoreBookRegistry.LoreBook b : LoreBookRegistry.BOOKS) {
-                                        if (b.secretByDefault()) d.unlockedBooks.add(b.id());
-                                    }
-                                    target.setData(PassportData.PASSPORT, d);
-                                    syncPlayerDataWithOnlineStatus(target);
-                                    target.sendSystemMessage(Component.literal("§d📖 [Библиотека Либры] §aВсе тайные фолианты открыты и поставлены на вашу книжную полку!"));
-                                    ctx.getSource().sendSuccess(() -> Component.literal("§aВсе секретные книги открыты для " + target.getName().getString()), true);
-                                    return 1;
-                                }
-
-                                LoreBookRegistry.LoreBook lb = LoreBookRegistry.byId(bookId);
-                                if (lb == null) {
-                                    ctx.getSource().sendFailure(Component.literal("§cКнига с ID «" + bookId + "» не найдена!"));
-                                    return 0;
-                                }
-                                d.unlockedBooks.add(lb.id());
-                                target.setData(PassportData.PASSPORT, d);
-                                syncPlayerDataWithOnlineStatus(target);
-                                target.sendSystemMessage(Component.literal("§d📖 [Библиотека Либры] §eВы обрели тайный том «§6" + lb.spineTitle() + "§e»! Проверьте вкладку §bИНФОРМАЦИЯ§e."));
-                                target.playNotifySound(SoundEvents.ENCHANTMENT_TABLE_USE, SoundSource.MASTER, 1.0f, 1.15f);
-                                ctx.getSource().sendSuccess(() -> Component.literal("§aКнига «" + lb.spineTitle() + "» добавлена на полку игрока!"), true);
-                                return 1;
-                            })
-                        )
-                    )
-                )
-        );
-
         event.getDispatcher().register(
             Commands.literal("passport")
                 .then(Commands.literal("reset")
@@ -1063,6 +1062,52 @@ public class ServerEvents {
                             sendPassportCard(sender, target, d);
                             return 1;
                         })
+                    )
+                )
+        );
+
+        // Команда управления секретными лорными книгами: /lorebook unlock|give <игрок> <id_книги>
+        event.getDispatcher().register(
+            Commands.literal("lorebook")
+                .requires(source -> source.hasPermission(2))
+                .then(Commands.literal("unlock")
+                    .then(Commands.argument("target", EntityArgument.player())
+                        .then(Commands.argument("bookId", StringArgumentType.word())
+                            .suggests((ctx, builder) -> SharedSuggestionProvider.suggest(
+                                LoreBookRegistry.BOOKS.stream().filter(LoreBookRegistry.LoreBook::secretByDefault).map(LoreBookRegistry.LoreBook::id), builder))
+                            .executes(ctx -> {
+                                ServerPlayer t = EntityArgument.getPlayer(ctx, "target");
+                                String bId = StringArgumentType.getString(ctx, "bookId");
+                                LoreBookRegistry.LoreBook b = LoreBookRegistry.byId(bId);
+                                if (b == null) {
+                                    ctx.getSource().sendFailure(Component.literal("§cТом с ID «" + bId + "» не найден."));
+                                    return 0;
+                                }
+                                PassportData d = t.getData(PassportData.PASSPORT);
+                                d.unlockedBooks.add(bId);
+                                t.setData(PassportData.PASSPORT, d);
+                                syncPlayerDataWithOnlineStatus(t);
+                                t.sendSystemMessage(Component.literal("§6[Архив Либры] §aНа вашей книжной полке открыт тайный том: «§e" + b.fullTitle() + "§a»!"));
+                                return 1;
+                            })
+                        )
+                    )
+                )
+                .then(Commands.literal("give")
+                    .then(Commands.argument("target", EntityArgument.player())
+                        .then(Commands.argument("bookId", StringArgumentType.word())
+                            .suggests((ctx, builder) -> SharedSuggestionProvider.suggest(
+                                LoreBookRegistry.BOOKS.stream().filter(LoreBookRegistry.LoreBook::secretByDefault).map(LoreBookRegistry.LoreBook::id), builder))
+                            .executes(ctx -> {
+                                ServerPlayer t = EntityArgument.getPlayer(ctx, "target");
+                                String bId = StringArgumentType.getString(ctx, "bookId");
+                                LoreBookRegistry.LoreBook b = LoreBookRegistry.byId(bId);
+                                if (b == null) return 0;
+                                t.getInventory().add(createLoreBookItem(b));
+                                t.sendSystemMessage(Component.literal("§6[Архив Либры] §eВы получили запечатанный том «" + b.spineTitle() + "»!"));
+                                return 1;
+                            })
+                        )
                     )
                 )
         );
