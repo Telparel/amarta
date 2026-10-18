@@ -15,6 +15,8 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.SimpleMenuProvider;
+import net.minecraft.world.inventory.ChestMenu;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.network.PacketDistributor;
@@ -29,6 +31,11 @@ public class PassportNetworking {
     public static final int CHUNK_SIZE = 24000;
     public static final Map<String, List<String>> CLIENT_DM_HISTORY = new HashMap<>();
     public static final Map<String, Integer> CLIENT_UNREAD_COUNTS = new HashMap<>();
+
+    // Клиентские данные текущей Группы (для меню и WoW HUD) и Содружества
+    public static CompoundTag CLIENT_PARTY_DATA = new CompoundTag();
+    public static CompoundTag CLIENT_GUILD_DATA = new CompoundTag();
+
     private static final Map<String, byte[][]> SERVER_INCOMING_CHUNKS = new HashMap<>();
 
     public static void addClientMessage(String partnerUuid, String formattedLine) {
@@ -67,7 +74,6 @@ public class PassportNetworking {
                 ByteBufCodecs.COMPOUND_TAG, PassportPayload::tag,
                 PassportPayload::new
         );
-
         @Override
         public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
@@ -78,7 +84,6 @@ public class PassportNetworking {
                 ByteBufCodecs.STRING_UTF8, SelectTitlePayload::factionId,
                 SelectTitlePayload::new
         );
-
         @Override
         public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
@@ -91,7 +96,6 @@ public class PassportNetworking {
                 ByteBufCodecs.STRING_UTF8, SocialActionPayload::extra,
                 SocialActionPayload::new
         );
-
         @Override
         public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
@@ -105,7 +109,17 @@ public class PassportNetworking {
                 ByteBufCodecs.BYTE_ARRAY, ImageChunkPayload::data,
                 ImageChunkPayload::new
         );
+        @Override
+        public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
 
+    public record PartyGuildSyncPayload(CompoundTag partyTag, CompoundTag guildTag) implements CustomPacketPayload {
+        public static final Type<PartyGuildSyncPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("amarthaloe", "party_guild_sync"));
+        public static final StreamCodec<FriendlyByteBuf, PartyGuildSyncPayload> STREAM_CODEC = StreamCodec.composite(
+                ByteBufCodecs.COMPOUND_TAG, PartyGuildSyncPayload::partyTag,
+                ByteBufCodecs.COMPOUND_TAG, PartyGuildSyncPayload::guildTag,
+                PartyGuildSyncPayload::new
+        );
         @Override
         public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
@@ -197,6 +211,21 @@ public class PassportNetworking {
                             OfflineMailStorage.get(sp.server).saveImage(payload.imageId(), full);
                         } else if (context.flow().isClientbound()) {
                             ClientImageManager.receiveChunkFromServer(payload.imageId(), payload.chunkIdx(), payload.totalChunks(), payload.data());
+                        }
+                    });
+                }
+        );
+
+        registrar.playToClient(
+                PartyGuildSyncPayload.TYPE,
+                PartyGuildSyncPayload.STREAM_CODEC,
+                (payload, context) -> {
+                    context.enqueueWork(() -> {
+                        if (!payload.partyTag().getBoolean("ignoreParty")) {
+                            CLIENT_PARTY_DATA = payload.partyTag();
+                        }
+                        if (!payload.guildTag().getBoolean("ignoreGuild")) {
+                            CLIENT_GUILD_DATA = payload.guildTag();
                         }
                     });
                 }
@@ -328,8 +357,8 @@ public class PassportNetworking {
                         PassportData otherData = other.getData(PassportData.PASSPORT);
                         otherData.friends.add(senderUuid);
                         otherData.incomingRequests.remove(senderUuid);
-                        otherData.knownProfiles.put(senderUuid, otherData.toProfileSnapshot(senderUuid, sender.getName().getString(), true));
-                        otherData.knownProfiles.put(targetStr, otherData.toProfileSnapshot(targetStr, other.getName().getString(), true));
+                        otherData.knownProfiles.put(senderUuid, senderData.toProfileSnapshot(senderUuid, sender.getName().getString(), true));
+                        senderData.knownProfiles.put(targetStr, otherData.toProfileSnapshot(targetStr, other.getName().getString(), true));
                         other.setData(PassportData.PASSPORT, otherData);
                         other.sendSystemMessage(Component.literal("§6[Друзья] §a" + senderName + " принял(а) ваш запрос в друзья!"));
                         other.playNotifySound(SoundEvents.PLAYER_LEVELUP, SoundSource.MASTER, 0.6f, 1.3f);
@@ -360,25 +389,27 @@ public class PassportNetworking {
                 sender.sendSystemMessage(Component.literal("§6[Друзья] §7Игрок удален из списка друзей."));
                 ServerEvents.syncPlayerDataWithOnlineStatus(sender);
             }
-            case "INVITE_PARTY" -> {
-                if (targetStr.startsWith("bot-")) {
-                    CompoundTag botProf = senderData.knownProfiles.get(targetStr);
-                    String botName = botProf != null ? botProf.getString("rpName") : "Бот";
-                    sender.sendSystemMessage(Component.literal("§6[Группа] §aВы отправили приглашение в группу персонажу §e" + botName + "§a!"));
-                    sender.playNotifySound(SoundEvents.NOTE_BLOCK_CHIME.value(), SoundSource.MASTER, 1.0f, 1.2f);
-                    return;
-                }
-                ServerPlayer other = sender.server.getPlayerList().getPlayer(UUID.fromString(targetStr));
-                if (other == null) {
-                    sender.sendSystemMessage(Component.literal("§c[Группа] Игрок сейчас не в сети!"));
-                    return;
-                }
-                PassportData otherData = other.getData(PassportData.PASSPORT);
-                String otherName = otherData.rpName.isEmpty() ? other.getName().getString() : otherData.rpName;
-                sender.sendSystemMessage(Component.literal("§6[Группа] §aВы отправили приглашение в группу игроку §e" + otherName + "§a."));
-                other.sendSystemMessage(Component.literal("§6[Группа] §e" + senderName + " §fприглашает вас в группу!"));
-                other.playNotifySound(SoundEvents.NOTE_BLOCK_CHIME.value(), SoundSource.MASTER, 1.0f, 1.2f);
-            }
+
+            // --- СИСТЕМА ГРУПП (ЛИМИТ 5 ЧЕЛОВЕК) ---
+            case "INVITE_PARTY" -> ServerEvents.handlePartyInvite(sender, targetStr);
+            case "PARTY_ACCEPT" -> ServerEvents.handlePartyAccept(sender, targetStr);
+            case "PARTY_DECLINE" -> ServerEvents.handlePartyDecline(sender);
+            case "PARTY_TOGGLE_FF" -> ServerEvents.handlePartyToggleFF(sender);
+            case "PARTY_KICK" -> ServerEvents.handlePartyLeaveOrKick(sender, targetStr);
+            case "PARTY_LEAVE" -> ServerEvents.handlePartyLeaveOrKick(sender, senderUuid);
+
+            // --- СИСТЕМА СОДРУЖЕСТВ (КЛАНОВ) ---
+            case "GUILD_CREATE" -> ServerEvents.handleGuildCreate(sender, targetStr, extra);
+            case "GUILD_INVITE" -> ServerEvents.handleGuildInvite(sender, targetStr);
+            case "GUILD_ACCEPT" -> ServerEvents.handleGuildAccept(sender, targetStr);
+            case "GUILD_DECLINE" -> ServerEvents.handleGuildDecline(sender, targetStr);
+            case "GUILD_TOGGLE_FF" -> ServerEvents.handleGuildToggleFF(sender);
+            case "GUILD_CHANGE_RANK" -> ServerEvents.handleGuildChangeRank(sender, targetStr, extra);
+            case "GUILD_TOGGLE_CHEST" -> ServerEvents.handleGuildToggleChestAccess(sender, targetStr);
+            case "GUILD_OPEN_CHEST" -> ServerEvents.handleGuildOpenChest(sender);
+            case "GUILD_KICK" -> ServerEvents.handleGuildKickOrLeave(sender, targetStr);
+            case "GUILD_LEAVE" -> ServerEvents.handleGuildKickOrLeave(sender, senderUuid);
+
             case "MARK_READ" -> {
                 mail.markAsRead(senderUuid, targetStr);
                 PacketDistributor.sendToPlayer(sender, new SocialActionPayload("SET_UNREAD", targetStr, "0"));
@@ -459,9 +490,10 @@ public class PassportNetworking {
         }
     }
 
-    private static ServerPlayer findPlayerByNameOrRpName(ServerPlayer requester, String query) {
+    public static ServerPlayer findPlayerByNameOrRpName(ServerPlayer requester, String query) {
         String q = query.trim();
         for (ServerPlayer sp : requester.server.getPlayerList().getPlayers()) {
+            if (sp.getStringUUID().equalsIgnoreCase(q)) return sp;
             if (sp.getName().getString().equalsIgnoreCase(q)) return sp;
             PassportData d = sp.getData(PassportData.PASSPORT);
             if (!d.rpName.isEmpty() && d.rpName.equalsIgnoreCase(q)) return sp;
