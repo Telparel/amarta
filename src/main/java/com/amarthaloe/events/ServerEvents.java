@@ -36,7 +36,6 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
-import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.network.PacketDistributor;
 
@@ -96,56 +95,6 @@ public class ServerEvents {
             return Component.literal(guildPrefix + color + "[" + title + "] §f" + baseName);
         } else {
             return Component.literal(guildPrefix + "§f" + baseName);
-        }
-    }
-
-    // Позволяет также поместить найденный Фолиант на полку правым кликом мыши в руке
-    @SubscribeEvent
-    public static void onRightClickItem(PlayerInteractEvent.RightClickItem event) {
-        if (event.getEntity() instanceof ServerPlayer sp) {
-            ItemStack stack = event.getItemStack();
-            LoreBookRegistry book = LoreBookRegistry.fromItemStack(stack);
-            if (book != null) {
-                event.setCanceled(true);
-                PassportData data = sp.getData(PassportData.PASSPORT);
-                if (data.isBookUnlocked(book)) {
-                    sp.sendSystemMessage(Component.literal("§6[Архив Амарталоэ] §eФолиант «" + book.spineTitle + "» уже стоит на вашей книжной полке! Откройте §b[M] -> ИНФОРМАЦИЯ§e."));
-                } else {
-                    data.unlockedBooks.add(book.id);
-                    stack.shrink(1);
-                    sp.setData(PassportData.PASSPORT, data);
-                    syncPlayerDataWithOnlineStatus(sp);
-                    sp.sendSystemMessage(Component.literal("§6[Архив Амарталоэ] §aВы поместили фолиант «§e" + book.spineTitle + "§a» на свою книжную полку! Откройте §b[M] -> ИНФОРМАЦИЯ§a, чтобы прочитать его."));
-                    sp.playNotifySound(SoundEvents.BOOK_PAGE_TURN, SoundSource.MASTER, 1.0f, 1.1f);
-                    sp.playNotifySound(SoundEvents.PLAYER_LEVELUP, SoundSource.MASTER, 0.5f, 1.3f);
-                }
-            }
-        }
-    }
-
-    // Помещение найденной в инвентаре книги на полку кнопкой прямо из вкладки ИНФОРМАЦИЯ
-    public static void handleShelfInsertBook(ServerPlayer sp) {
-        PassportData data = sp.getData(PassportData.PASSPORT);
-        boolean foundAny = false;
-
-        for (int i = 0; i < sp.getInventory().getContainerSize(); i++) {
-            ItemStack st = sp.getInventory().getItem(i);
-            LoreBookRegistry book = LoreBookRegistry.fromItemStack(st);
-            if (book != null && !data.isBookUnlocked(book)) {
-                data.unlockedBooks.add(book.id);
-                st.shrink(1);
-                foundAny = true;
-                sp.sendSystemMessage(Component.literal("§6[Архив Амарталоэ] §aФолиант «§e" + book.spineTitle + "§a» установлен на книжную полку!"));
-            }
-        }
-
-        if (foundAny) {
-            sp.setData(PassportData.PASSPORT, data);
-            syncPlayerDataWithOnlineStatus(sp);
-            sp.playNotifySound(SoundEvents.BOOK_PAGE_TURN, SoundSource.MASTER, 1.0f, 1.15f);
-            sp.playNotifySound(SoundEvents.UI_TOAST_CHALLENGE_COMPLETE, SoundSource.MASTER, 0.7f, 1.25f);
-        } else {
-            sp.sendSystemMessage(Component.literal("§c[Архив] В вашем инвентаре нет новых неизученных фолиантов."));
         }
     }
 
@@ -311,19 +260,17 @@ public class ServerEvents {
 
         data.activeQuests.remove(questId);
         data.nomes += q.rewardNomes;
-        player.setData(PassportData.PASSPORT, data);
 
-        // Если за этот контракт полагается редкий лорный фолиант — выдаем его в инвентарь!
+        // Если к заказу привязана секретная лорная книга — ставим её на книжную полку игрока!
         if (q.rewardBookId != null && !q.rewardBookId.isEmpty()) {
-            LoreBookRegistry rewardBook = LoreBookRegistry.byId(q.rewardBookId);
-            if (rewardBook != null) {
-                ItemStack bookStack = rewardBook.createBookItemStack();
-                if (!player.getInventory().add(bookStack)) {
-                    player.drop(bookStack, false);
-                }
-                player.sendSystemMessage(Component.literal("§d★ [Редкая Награда] §eВы получили «" + rewardBook.spineTitle + "»! Откройте §b[M] -> ИНФОРМАЦИЯ§e, чтобы поставить книгу на полку!"));
-            }
+            data.unlockedBooks.add(q.rewardBookId);
+            LoreBookRegistry.LoreBook lb = LoreBookRegistry.byId(q.rewardBookId);
+            String bookName = lb != null ? lb.spineTitle() : q.rewardBookId;
+            player.sendSystemMessage(Component.literal("§d§l📖 [Вавилонская Библиотека] §eВы добыли редкий том «§6" + bookName + "§e»! Он поставлен на вашу книжную полку во вкладке §bИНФОРМАЦИЯ§e."));
+            player.playNotifySound(SoundEvents.ENCHANTMENT_TABLE_USE, SoundSource.MASTER, 1.0f, 1.1f);
         }
+
+        player.setData(PassportData.PASSPORT, data);
 
         mail.getBoardNotices().remove(questId);
         mail.ensureNpcQuestsPopulated();
@@ -1037,45 +984,52 @@ public class ServerEvents {
 
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
-        // Команда выдачи и тестирования редких лорных книг: /lorebook give <legion_of_light | soul_magic | all> или /lorebook reset
+        // Команда выдачи секретных лорных книг на полку игрока: /lore unlock|lock <игрок> <id_книги|all>
         event.getDispatcher().register(
-            Commands.literal("lorebook")
-                .then(Commands.literal("give")
-                    .then(Commands.argument("bookId", StringArgumentType.word())
-                        .suggests((ctx, builder) -> SharedSuggestionProvider.suggest(List.of("legion_of_light", "soul_magic", "all"), builder))
-                        .executes(ctx -> {
-                            ServerPlayer sp = ctx.getSource().getPlayerOrException();
-                            String arg = StringArgumentType.getString(ctx, "bookId");
-                            if ("all".equalsIgnoreCase(arg)) {
-                                sp.getInventory().add(LoreBookRegistry.BOOK_LEGION_OF_LIGHT.createBookItemStack());
-                                sp.getInventory().add(LoreBookRegistry.BOOK_SOUL_MAGIC.createBookItemStack());
-                                sp.sendSystemMessage(Component.literal("§6[Архив] §aВы получили оба закрытых фолианта: «Легион Света» и «Природа Души»! Откройте §b[M] -> ИНФОРМАЦИЯ§a, чтобы поставить их на полку."));
+            Commands.literal("lore")
+                .requires(source -> source.hasPermission(2))
+                .then(Commands.literal("unlock")
+                    .then(Commands.argument("target", EntityArgument.player())
+                        .then(Commands.argument("bookId", StringArgumentType.word())
+                            .suggests((ctx, builder) -> {
+                                List<String> ids = new ArrayList<>();
+                                ids.add("all");
+                                for (LoreBookRegistry.LoreBook b : LoreBookRegistry.BOOKS) {
+                                    if (b.secretByDefault()) ids.add(b.id());
+                                }
+                                return SharedSuggestionProvider.suggest(ids, builder);
+                            })
+                            .executes(ctx -> {
+                                ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
+                                String bookId = StringArgumentType.getString(ctx, "bookId");
+                                PassportData d = target.getData(PassportData.PASSPORT);
+
+                                if ("all".equalsIgnoreCase(bookId)) {
+                                    for (LoreBookRegistry.LoreBook b : LoreBookRegistry.BOOKS) {
+                                        if (b.secretByDefault()) d.unlockedBooks.add(b.id());
+                                    }
+                                    target.setData(PassportData.PASSPORT, d);
+                                    syncPlayerDataWithOnlineStatus(target);
+                                    target.sendSystemMessage(Component.literal("§d📖 [Библиотека Либры] §aВсе тайные фолианты открыты и поставлены на вашу книжную полку!"));
+                                    ctx.getSource().sendSuccess(() -> Component.literal("§aВсе секретные книги открыты для " + target.getName().getString()), true);
+                                    return 1;
+                                }
+
+                                LoreBookRegistry.LoreBook lb = LoreBookRegistry.byId(bookId);
+                                if (lb == null) {
+                                    ctx.getSource().sendFailure(Component.literal("§cКнига с ID «" + bookId + "» не найдена!"));
+                                    return 0;
+                                }
+                                d.unlockedBooks.add(lb.id());
+                                target.setData(PassportData.PASSPORT, d);
+                                syncPlayerDataWithOnlineStatus(target);
+                                target.sendSystemMessage(Component.literal("§d📖 [Библиотека Либры] §eВы обрели тайный том «§6" + lb.spineTitle() + "§e»! Проверьте вкладку §bИНФОРМАЦИЯ§e."));
+                                target.playNotifySound(SoundEvents.ENCHANTMENT_TABLE_USE, SoundSource.MASTER, 1.0f, 1.15f);
+                                ctx.getSource().sendSuccess(() -> Component.literal("§aКнига «" + lb.spineTitle() + "» добавлена на полку игрока!"), true);
                                 return 1;
-                            }
-                            LoreBookRegistry book = LoreBookRegistry.byId(arg);
-                            if (book == null) {
-                                sp.sendSystemMessage(Component.literal("§cНеизвестная книга! Используйте: legion_of_light, soul_magic или all"));
-                                return 0;
-                            }
-                            sp.getInventory().add(book.createBookItemStack());
-                            sp.sendSystemMessage(Component.literal("§6[Архив] §aВы получили фолиант «§e" + book.spineTitle + "§a»! Откройте §b[M] -> ИНФОРМАЦИЯ§a, чтобы поместить его на полку."));
-                            return 1;
-                        })
+                            })
+                        )
                     )
-                )
-                .then(Commands.literal("reset")
-                    .executes(ctx -> {
-                        ServerPlayer sp = ctx.getSource().getPlayerOrException();
-                        PassportData data = sp.getData(PassportData.PASSPORT);
-                        data.unlockedBooks.clear();
-                        for (LoreBookRegistry b : LoreBookRegistry.values()) {
-                            if (b.defaultUnlocked) data.unlockedBooks.add(b.id);
-                        }
-                        sp.setData(PassportData.PASSPORT, data);
-                        syncPlayerDataWithOnlineStatus(sp);
-                        sp.sendSystemMessage(Component.literal("§6[Архив] §eКнижная полка сброшена: книги «Легион Света» и «Природа Души» снова закрыты."));
-                        return 1;
-                    })
                 )
         );
 
