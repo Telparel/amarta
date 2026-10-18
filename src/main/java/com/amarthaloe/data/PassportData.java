@@ -26,15 +26,15 @@ public class PassportData implements INBTSerializable<CompoundTag> {
     public String features = "";
     public String voice = "";
     public String optional = "";
-    public String photoId = ""; // ID фотографии паспорта и аватарки
+    public String photoId = "";
 
     public final Map<Faction, Integer> reputation = new EnumMap<>(Faction.class);
     public String activeTitleFaction = "";
+    public String guildTag = ""; // Тег содружества (до 4 букв) для чата и Таба
 
     public final Set<String> friends = new HashSet<>();
     public final Set<String> incomingRequests = new HashSet<>();
     public final Map<String, CompoundTag> knownProfiles = new HashMap<>();
-    // Синхронизируемые групповые чаты игрока (groupId -> CompoundTag с названием, аватаркой и участниками)
     public final Map<String, CompoundTag> groupChats = new LinkedHashMap<>();
 
     public PassportData() {
@@ -91,6 +91,7 @@ public class PassportData implements INBTSerializable<CompoundTag> {
         tag.putString("optional", optional);
         tag.putString("photoId", photoId);
         tag.putString("activeTitleFaction", activeTitleFaction);
+        tag.putString("guildTag", guildTag);
 
         CompoundTag repTag = new CompoundTag();
         for (Faction f : Faction.values()) {
@@ -136,6 +137,7 @@ public class PassportData implements INBTSerializable<CompoundTag> {
         optional = tag.getString("optional");
         photoId = tag.getString("photoId");
         activeTitleFaction = tag.getString("activeTitleFaction");
+        guildTag = tag.getString("guildTag");
 
         if (tag.contains("reputation")) {
             CompoundTag repTag = tag.getCompound("reputation");
