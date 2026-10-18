@@ -19,6 +19,7 @@ import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.event.CommandEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.ServerChatEvent;
 
@@ -43,13 +44,11 @@ public class RpChatAndCommands {
         String rawMsg = event.getRawText().trim();
         if (rawMsg.isEmpty()) return;
 
-        // Перехватываем ванильное сообщение, чтобы вывести наше кастомное оформление
         event.setCanceled(true);
 
         Component formattedAuthor = ServerEvents.buildFormattedDisplayName(sender, sender.getName().getString());
 
         if (rawMsg.startsWith("!")) {
-            // ГЛОБАЛЬНЫЙ ЧАТ НА ВЕСЬ СЕРВЕР
             String globalText = rawMsg.substring(1).trim();
             if (globalText.isEmpty()) return;
 
@@ -61,7 +60,6 @@ public class RpChatAndCommands {
                 p.sendSystemMessage(msg);
             }
         } else {
-            // ЛОКАЛЬНЫЙ ЧАТ (100 БЛОКОВ)
             MutableComponent msg = Component.literal("§7[Локал] ")
                     .append(formattedAuthor)
                     .append(Component.literal(" §8» §f" + rawMsg));
@@ -73,7 +71,36 @@ public class RpChatAndCommands {
         }
     }
 
-    // Вспомогательная рассылка сообщения всем игрокам в радиусе R блоков в том же измерении
+    // Дополнительный перехватчик на случай, если клиент отправляет /me или /w как подписанный пакет
+    @SubscribeEvent
+    public static void onCommandPreprocess(CommandEvent event) {
+        CommandSourceStack source = event.getParseResults().getContext().getSource();
+        if (!(source.getEntity() instanceof ServerPlayer sender)) return;
+
+        String input = event.getParseResults().getReader().getString();
+        if (input.startsWith("/")) input = input.substring(1);
+
+        if (input.regionMatches(true, 0, "me ", 0, 3)) {
+            event.setCanceled(true);
+            String action = input.substring(3).trim();
+            if (!action.isEmpty()) {
+                String name = getRpName(sender);
+                sendInRadius(sender, LOCAL_RADIUS, Component.literal("§d* " + name + " " + action));
+            }
+        } else if (input.regionMatches(true, 0, "w ", 0, 2)) {
+            event.setCanceled(true);
+            String text = input.substring(2).trim();
+            if (!text.isEmpty()) {
+                String name = getRpName(sender);
+                Component whisperMsg = Component.literal("§3[Шепот] §b" + name + " §7тихо шепчет: §7§o" + text);
+                int heard = sendInRadius(sender, WHISPER_RADIUS, whisperMsg);
+                if (heard <= 1) {
+                    sender.sendSystemMessage(Component.literal("§8§o* Рядом (в радиусе 5 блоков) нет никого, кто услышал бы ваш шепот."));
+                }
+            }
+        }
+    }
+
     public static int sendInRadius(ServerPlayer source, double radius, Component message) {
         double maxDistSq = radius * radius;
         int count = 0;
@@ -96,7 +123,13 @@ public class RpChatAndCommands {
     public static void onRegisterCommands(RegisterCommandsEvent event) {
         CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
 
-        // /w <текст> — Шепот в радиусе 5 блоков (переопределяет стандартный /w под локальный РП-шепот!)
+        // ВАЖНО: Удаляем стандартные ванильные команды /me и /w из дерева Brigadier,
+        // чтобы они не конфликтовали своими аргументами подписи чата (MessageArgument) с нашими!
+        dispatcher.getRoot().getChildren().removeIf(node ->
+                node.getName().equals("me") || node.getName().equals("w")
+        );
+
+        // /w <текст> — Шепот в радиусе 5 блоков
         dispatcher.register(
             Commands.literal("w")
                 .then(Commands.argument("message", StringArgumentType.greedyString())
@@ -198,12 +231,10 @@ public class RpChatAndCommands {
                 })
         );
 
-        // Социальные взаимодействия: /hug, /kiss, /pat <ник или РП-имя>
         registerSocialEmotionCommand(dispatcher, "hug", "обнять", "обнял(а)", "крепко обнимает");
         registerSocialEmotionCommand(dispatcher, "kiss", "поцеловать", "поцеловал(а)", "нежно целует");
         registerSocialEmotionCommand(dispatcher, "pat", "погладить по голове", "погладил(а) по голове", "ласково гладит по голове");
 
-        // Скрытая системная команда для обработки клика по кнопкам [✔ Принять] и [✖ Отказать] в чате
         dispatcher.register(
             Commands.literal("rpinteract")
                 .then(Commands.argument("id", StringArgumentType.word())
@@ -262,7 +293,6 @@ public class RpChatAndCommands {
 
                         sender.sendSystemMessage(Component.literal("§d[РП] §7Вы предложили персонажу §e" + targetName + " §7действие: §f" + infinitive + "§7. Ожидание ответа..."));
 
-                        // Создаем кликабельные кнопки [✔ Принять] и [✖ Отказать] прямо в чате получателя!
                         MutableComponent acceptBtn = Component.literal("§a§l[✔ Принять]")
                                 .withStyle(Style.EMPTY
                                         .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/rpinteract " + reqId + " accept"))
@@ -294,7 +324,6 @@ public class RpChatAndCommands {
         }
         if (!pending.targetUuid().equals(target.getUUID())) return;
 
-        // Срок действия запроса — 60 секунд
         if (System.currentTimeMillis() - pending.timestamp() > 60000) {
             target.sendSystemMessage(Component.literal("§c[РП] Время ожидания ответа истекло."));
             return;
@@ -320,7 +349,6 @@ public class RpChatAndCommands {
 
             sendInRadius(sender, LOCAL_RADIUS, Component.literal(actionLine));
 
-            // Красивые частицы сердечек над обоими игроками и нежный звук
             sLevel.sendParticles(ParticleTypes.HEART, sender.getX(), sender.getY() + 2.0, sender.getZ(), 5, 0.3, 0.2, 0.3, 0.02);
             sLevel.sendParticles(ParticleTypes.HEART, target.getX(), target.getY() + 2.0, target.getZ(), 5, 0.3, 0.2, 0.3, 0.02);
             sLevel.playSound(null, target.blockPosition(), SoundEvents.AMETHYST_BLOCK_RESONATE, SoundSource.PLAYERS, 0.8f, 1.3f);
