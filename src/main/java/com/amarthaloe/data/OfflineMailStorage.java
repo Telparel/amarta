@@ -1,11 +1,15 @@
 package com.amarthaloe.data;
 
 import net.minecraft.core.HolderLookup;
+import net.minecraft.core.NonNullList;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.ContainerHelper;
+import net.minecraft.world.SimpleContainer;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.saveddata.SavedData;
 
 import java.util.*;
@@ -43,18 +47,127 @@ public class OfflineMailStorage extends SavedData {
         }
     }
 
+    public static class GuildInfo {
+        public String guildId = "";
+        public String name = "";
+        public String tag = ""; // До 4 символов
+        public String avatarId = "";
+        public String leaderUuid = "";
+        public boolean friendlyFire = false;
+        public String chatGroupId = ""; // ID автоматически созданной беседы содружества
+
+        // UUID участника -> Ранг ("LEADER", "OFFICER", "MENTOR", "MEMBER")
+        public final Map<String, String> memberRanks = new LinkedHashMap<>();
+        // UUID участников, которым Лидер выдал доступ к клановому сундуку
+        public final Set<String> chestAllowed = new HashSet<>();
+        // Входящие приглашения (UUID приглашенных игроков)
+        public final Set<String> invitedPlayers = new HashSet<>();
+        // Клановый сундук (27 слотов)
+        public final SimpleContainer chest = new SimpleContainer(27);
+
+        public static String getRankDisplayName(String rank) {
+            return switch (rank) {
+                case "LEADER" -> "Лидер";
+                case "OFFICER" -> "Офицер";
+                case "MENTOR" -> "Ментор";
+                default -> "Участник";
+            };
+        }
+
+        public CompoundTag toTag(HolderLookup.Provider provider) {
+            CompoundTag t = new CompoundTag();
+            t.putString("guildId", guildId);
+            t.putString("name", name);
+            t.putString("tag", tag);
+            t.putString("avatarId", avatarId);
+            t.putString("leaderUuid", leaderUuid);
+            t.putBoolean("friendlyFire", friendlyFire);
+            t.putString("chatGroupId", chatGroupId);
+
+            CompoundTag ranksTag = new CompoundTag();
+            for (Map.Entry<String, String> e : memberRanks.entrySet()) {
+                ranksTag.putString(e.getKey(), e.getValue());
+            }
+            t.put("memberRanks", ranksTag);
+
+            ListTag chestList = new ListTag();
+            for (String u : chestAllowed) chestList.add(StringTag.valueOf(u));
+            t.put("chestAllowed", chestList);
+
+            ListTag invList = new ListTag();
+            for (String u : invitedPlayers) invList.add(StringTag.valueOf(u));
+            t.put("invitedPlayers", invList);
+
+            NonNullList<ItemStack> items = NonNullList.withSize(27, ItemStack.EMPTY);
+            for (int i = 0; i < 27; i++) items.set(i, chest.getItem(i));
+            CompoundTag invTag = new CompoundTag();
+            ContainerHelper.saveAllItems(invTag, items, provider);
+            t.put("chestInv", invTag);
+
+            return t;
+        }
+
+        public static GuildInfo fromTag(CompoundTag t, HolderLookup.Provider provider) {
+            GuildInfo g = new GuildInfo();
+            g.guildId = t.getString("guildId");
+            g.name = t.getString("name");
+            g.tag = t.getString("tag");
+            g.avatarId = t.getString("avatarId");
+            g.leaderUuid = t.getString("leaderUuid");
+            g.friendlyFire = t.getBoolean("friendlyFire");
+            g.chatGroupId = t.getString("chatGroupId");
+
+            if (t.contains("memberRanks")) {
+                CompoundTag ranksTag = t.getCompound("memberRanks");
+                for (String key : ranksTag.getAllKeys()) {
+                    g.memberRanks.put(key, ranksTag.getString(key));
+                }
+            }
+            if (t.contains("chestAllowed")) {
+                ListTag list = t.getList("chestAllowed", Tag.TAG_STRING);
+                for (int i = 0; i < list.size(); i++) g.chestAllowed.add(list.getString(i));
+            }
+            if (t.contains("invitedPlayers")) {
+                ListTag list = t.getList("invitedPlayers", Tag.TAG_STRING);
+                for (int i = 0; i < list.size(); i++) g.invitedPlayers.add(list.getString(i));
+            }
+            if (t.contains("chestInv")) {
+                NonNullList<ItemStack> items = NonNullList.withSize(27, ItemStack.EMPTY);
+                ContainerHelper.loadAllItems(t.getCompound("chestInv"), items, provider);
+                for (int i = 0; i < 27; i++) g.chest.setItem(i, items.get(i));
+            }
+            return g;
+        }
+    }
+
     private final Map<String, List<String>> chatHistories = new HashMap<>();
     private final Map<String, Map<String, Integer>> unreadCounts = new HashMap<>();
-
-    // Хранилище загруженных изображений (imageId -> PNG байты)
     private final Map<String, byte[]> images = new HashMap<>();
-    // Групповые чаты (groupId -> GroupChatInfo)
     private final Map<String, GroupChatInfo> groupChats = new HashMap<>();
+    private final Map<String, GuildInfo> guilds = new HashMap<>();
 
     public static String getConversationKey(String uuid1, String uuid2) {
         if (uuid1.startsWith("group_")) return uuid1;
         if (uuid2.startsWith("group_")) return uuid2;
         return uuid1.compareTo(uuid2) < 0 ? uuid1 + "|" + uuid2 : uuid2 + "|" + uuid1;
+    }
+
+    public Map<String, GuildInfo> getGuilds() {
+        return guilds;
+    }
+
+    public GuildInfo getPlayerGuild(String playerUuid) {
+        for (GuildInfo g : guilds.values()) {
+            if (g.memberRanks.containsKey(playerUuid)) return g;
+        }
+        return null;
+    }
+
+    public GuildInfo getPendingGuildInvite(String playerUuid) {
+        for (GuildInfo g : guilds.values()) {
+            if (g.invitedPlayers.contains(playerUuid)) return g;
+        }
+        return null;
     }
 
     public void saveImage(String imageId, byte[] bytes) {
@@ -161,6 +274,12 @@ public class OfflineMailStorage extends SavedData {
         }
         tag.put("groupChats", groupsTag);
 
+        CompoundTag guildsTag = new CompoundTag();
+        for (Map.Entry<String, GuildInfo> entry : guilds.entrySet()) {
+            guildsTag.put(entry.getKey(), entry.getValue().toTag(provider));
+        }
+        tag.put("guilds", guildsTag);
+
         return tag;
     }
 
@@ -194,6 +313,12 @@ public class OfflineMailStorage extends SavedData {
             CompoundTag groupsTag = tag.getCompound("groupChats");
             for (String key : groupsTag.getAllKeys()) {
                 storage.groupChats.put(key, GroupChatInfo.fromTag(groupsTag.getCompound(key)));
+            }
+        }
+        if (tag.contains("guilds")) {
+            CompoundTag guildsTag = tag.getCompound("guilds");
+            for (String key : guildsTag.getAllKeys()) {
+                storage.guilds.put(key, GuildInfo.fromTag(guildsTag.getCompound(key), provider));
             }
         }
         return storage;
