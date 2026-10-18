@@ -9,6 +9,7 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.commands.arguments.EntityArgument;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.network.chat.Component;
@@ -16,6 +17,7 @@ import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.sounds.SoundEvents;
@@ -23,11 +25,14 @@ import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.SimpleMenuProvider;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.ChestMenu;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.phys.Vec3;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
@@ -38,12 +43,11 @@ import java.util.*;
 @EventBusSubscriber(modid = "amarthaloe", bus = EventBusSubscriber.Bus.GAME)
 public class ServerEvents {
 
-    // --- СЕРВЕРНЫЙ МЕНЕДЖЕР АКТИВНЫХ ГРУПП (до 5 человек) ---
     public static class PartyInstance {
         public String partyId = UUID.randomUUID().toString().substring(0, 8);
         public String leaderUuid;
         public boolean friendlyFire = false;
-        public final List<String> members = new ArrayList<>(); // Макс 5
+        public final List<String> members = new ArrayList<>();
 
         public PartyInstance(String leaderUuid) {
             this.leaderUuid = leaderUuid;
@@ -51,8 +55,9 @@ public class ServerEvents {
         }
     }
 
-    public static final Map<String, PartyInstance> PLAYER_PARTIES = new HashMap<>(); // playerUuid -> PartyInstance
-    public static final Map<String, String> PENDING_PARTY_INVITES = new HashMap<>(); // targetUuid -> leaderUuid
+    public static final Map<String, PartyInstance> PLAYER_PARTIES = new HashMap<>();
+    public static final Map<String, String> PENDING_PARTY_INVITES = new HashMap<>();
+    private static final Map<UUID, Vec3> LAST_PLAYER_POS = new HashMap<>();
     private static int tickCounter = 0;
 
     public static void refreshAllNames(ServerPlayer sp) {
@@ -74,7 +79,6 @@ public class ServerEvents {
         }
     }
 
-    // Формирует: <ТЕГ> [Титул] Имя
     public static Component buildFormattedDisplayName(Player player, String fallbackUsername) {
         PassportData data = player.getData(PassportData.PASSPORT);
         String baseName = (data.isLocked && !data.rpName.trim().isEmpty())
@@ -93,18 +97,94 @@ public class ServerEvents {
         }
     }
 
-    // Ежесекундное обновление показателей группы (ХП, голод, предмет в руке) для WoW HUD
     @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
         tickCounter++;
         if (tickCounter % 20 == 0) {
+            OfflineMailStorage mail = OfflineMailStorage.get(event.getServer());
             for (ServerPlayer sp : event.getServer().getPlayerList().getPlayers()) {
+                // Отслеживаем пройденные блоки для квестов типа VISIT (Патруль/Разведка)
+                Vec3 now = sp.position();
+                Vec3 prev = LAST_PLAYER_POS.put(sp.getUUID(), now);
+                if (prev != null && prev.distanceToSqr(now) < 400) {
+                    int dist = (int) Math.round(Math.sqrt(prev.distanceToSqr(now)));
+                    if (dist > 0) {
+                        PassportData data = sp.getData(PassportData.PASSPORT);
+                        boolean changed = false;
+                        for (Map.Entry<String, Integer> entry : new ArrayList<>(data.activeQuests.entrySet())) {
+                            OfflineMailStorage.BoardNotice q = mail.getBoardNotices().get(entry.getKey());
+                            if (q != null && "VISIT".equals(q.questType)) {
+                                int oldP = entry.getValue();
+                                if (oldP < q.requiredCount) {
+                                    int newP = Math.min(q.requiredCount, oldP + dist);
+                                    data.activeQuests.put(q.id, newP);
+                                    changed = true;
+                                    if (newP >= q.requiredCount) {
+                                        sp.sendSystemMessage(Component.literal("§6[Доска Заказов] §aМаршрут контракта «§e" + q.title + "§a» пройден! Откройте §b[M] -> ОБЪЯВЛЕНИЯ§a для получения награды."));
+                                        sp.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.8f, 1.3f);
+                                    }
+                                }
+                            }
+                        }
+                        if (changed) {
+                            sp.setData(PassportData.PASSPORT, data);
+                            PacketDistributor.sendToPlayer(sp, new PassportNetworking.PassportPayload(data.serializeNBT(sp.registryAccess())));
+                        }
+                    }
+                }
                 syncPartyAndGuildToPlayer(sp, true, false);
+            }
+        }
+        // Каждые 5 минут (6000 тиков) добавляем новый случайный свиток на доску (до 15 НПС-свитков)
+        if (tickCounter % 6000 == 0) {
+            OfflineMailStorage mail = OfflineMailStorage.get(event.getServer());
+            long npcQuests = mail.getBoardNotices().values().stream().filter(n -> !n.isPlayerNote).count();
+            if (npcQuests < 15) {
+                mail.spawnRandomNpcQuest(new Random());
+                for (ServerPlayer sp : event.getServer().getPlayerList().getPlayers()) {
+                    syncPartyAndGuildToPlayer(sp, false, true);
+                }
             }
         }
     }
 
-    // Блокировка урона между участниками одной Группы или Содружества, если огонь по своим ВЫКЛЮЧЕН
+    // Засчитываем убийство мобов для контрактов типа KILL
+    @SubscribeEvent
+    public static void onLivingDeath(LivingDeathEvent event) {
+        if (event.getSource().getEntity() instanceof ServerPlayer killer) {
+            ResourceLocation entityLoc = BuiltInRegistries.ENTITY_TYPE.getKey(event.getEntity().getType());
+            if (entityLoc == null) return;
+            String killedId = entityLoc.toString();
+
+            OfflineMailStorage mail = OfflineMailStorage.get(killer.server);
+            PassportData data = killer.getData(PassportData.PASSPORT);
+            boolean updated = false;
+
+            for (Map.Entry<String, Integer> entry : new ArrayList<>(data.activeQuests.entrySet())) {
+                OfflineMailStorage.BoardNotice q = mail.getBoardNotices().get(entry.getKey());
+                if (q != null && "KILL".equals(q.questType) && q.targetId.equalsIgnoreCase(killedId)) {
+                    int prog = entry.getValue();
+                    if (prog < q.requiredCount) {
+                        prog++;
+                        data.activeQuests.put(q.id, prog);
+                        updated = true;
+                        if (prog >= q.requiredCount) {
+                            killer.sendSystemMessage(Component.literal("§6[Доска Заказов] §aКонтракт «§e" + q.title + "§a» выполнен (" + prog + "/" + q.requiredCount + ")! Сдайте его во вкладке §bОБЪЯВЛЕНИЯ§a."));
+                            killer.playNotifySound(SoundEvents.UI_TOAST_CHALLENGE_COMPLETE, SoundSource.MASTER, 0.7f, 1.3f);
+                        } else {
+                            killer.sendSystemMessage(Component.literal("§6[Контракт] §7" + q.title + ": §e" + prog + "/" + q.requiredCount));
+                        }
+                    }
+                }
+            }
+
+            if (updated) {
+                killer.setData(PassportData.PASSPORT, data);
+                PacketDistributor.sendToPlayer(killer, new PassportNetworking.PassportPayload(data.serializeNBT(killer.registryAccess())));
+            }
+        }
+    }
+
     @SubscribeEvent
     public static void onLivingDamage(LivingIncomingDamageEvent event) {
         if (event.getEntity() instanceof ServerPlayer victim && event.getSource().getEntity() instanceof ServerPlayer attacker) {
@@ -112,17 +192,127 @@ public class ServerEvents {
             String vUuid = victim.getStringUUID();
             String aUuid = attacker.getStringUUID();
 
-            // 1. Проверка Группы
             PartyInstance party = PLAYER_PARTIES.get(vUuid);
             if (party != null && party == PLAYER_PARTIES.get(aUuid) && !party.friendlyFire) {
                 event.setCanceled(true);
                 return;
             }
 
-            // 2. Проверка Содружества
             OfflineMailStorage.GuildInfo guild = OfflineMailStorage.get(victim.server).getPlayerGuild(vUuid);
             if (guild != null && guild.memberRanks.containsKey(aUuid) && !guild.friendlyFire) {
                 event.setCanceled(true);
+            }
+        }
+    }
+
+    // --- ОБРАБОТЧИКИ ДОСКИ ОБЪЯВЛЕНИЙ И КОНТРАКТОВ ---
+    public static void handleBoardAcceptQuest(ServerPlayer player, String questId) {
+        OfflineMailStorage mail = OfflineMailStorage.get(player.server);
+        OfflineMailStorage.BoardNotice q = mail.getBoardNotices().get(questId);
+        if (q == null || q.isPlayerNote) return;
+
+        PassportData data = player.getData(PassportData.PASSPORT);
+        if (data.activeQuests.containsKey(questId)) return;
+        if (data.activeQuests.size() >= 5) {
+            player.sendSystemMessage(Component.literal("§c[Доска Заказов] Вы не можете держать больше 5 активных контрактов одновременно!"));
+            return;
+        }
+
+        data.activeQuests.put(questId, 0);
+        player.setData(PassportData.PASSPORT, data);
+        PacketDistributor.sendToPlayer(player, new PassportNetworking.PassportPayload(data.serializeNBT(player.registryAccess())));
+        player.sendSystemMessage(Component.literal("§6[Доска Заказов] §aВы взяли контракт «§e" + q.title + "§a» от заказчика §f" + q.authorName + "§a!"));
+        player.playNotifySound(SoundEvents.BOOK_PAGE_TURN, SoundSource.MASTER, 1.0f, 1.0f);
+    }
+
+    public static void handleBoardCompleteQuest(ServerPlayer player, String questId) {
+        OfflineMailStorage mail = OfflineMailStorage.get(player.server);
+        OfflineMailStorage.BoardNotice q = mail.getBoardNotices().get(questId);
+        if (q == null || q.isPlayerNote) return;
+
+        PassportData data = player.getData(PassportData.PASSPORT);
+        if (!data.activeQuests.containsKey(questId)) return;
+
+        // Проверка условий выполнения
+        if ("GATHER".equals(q.questType)) {
+            Item reqItem = BuiltInRegistries.ITEM.get(ResourceLocation.parse(q.targetId));
+            int have = 0;
+            for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+                ItemStack st = player.getInventory().getItem(i);
+                if (!st.isEmpty() && st.is(reqItem)) have += st.getCount();
+            }
+            if (have < q.requiredCount) {
+                player.sendSystemMessage(Component.literal("§c[Контракт] Недостаточно предметов в инвентаре! Требуется: " + q.targetDisplay + " (" + have + "/" + q.requiredCount + ")"));
+                return;
+            }
+            // Списываем предметы по контракту
+            int toRemove = q.requiredCount;
+            for (int i = 0; i < player.getInventory().getContainerSize() && toRemove > 0; i++) {
+                ItemStack st = player.getInventory().getItem(i);
+                if (!st.isEmpty() && st.is(reqItem)) {
+                    int take = Math.min(toRemove, st.getCount());
+                    st.shrink(take);
+                    toRemove -= take;
+                }
+            }
+        } else {
+            int progress = data.activeQuests.getOrDefault(questId, 0);
+            if (progress < q.requiredCount) {
+                player.sendSystemMessage(Component.literal("§c[Контракт] Условия еще не выполнены (" + progress + "/" + q.requiredCount + ")!"));
+                return;
+            }
+        }
+
+        // Заказ выполнен! Удаляем свиток с доски, генерируем новый на замену и выдаем Номы + Репутацию
+        data.activeQuests.remove(questId);
+        data.nomes += q.rewardNomes;
+        player.setData(PassportData.PASSPORT, data);
+
+        mail.getBoardNotices().remove(questId);
+        mail.ensureNpcQuestsPopulated();
+        mail.setDirty();
+
+        player.sendSystemMessage(Component.literal("§8§m================================================"));
+        player.sendSystemMessage(Component.literal("§6§lКОНТРАКТ ИСПОЛНЕН: §e" + q.title));
+        player.sendSystemMessage(Component.literal("§7Заказчик: §f" + q.authorName));
+        player.sendSystemMessage(Component.literal("§a+ " + q.rewardNomes + " Номов §7(Баланс: §6" + data.nomes + " Номов§7)"));
+        player.sendSystemMessage(Component.literal("§8§m================================================"));
+        player.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 1.0f, 1.1f);
+
+        // Начисляем репутацию фракции (с проверкой повышения ступени и фанфарами)
+        changeRep(player.createCommandSourceStack(), player, q.factionId, q.rewardRep, true);
+
+        // Обновляем доску для всех игроков онлайн
+        for (ServerPlayer sp : player.server.getPlayerList().getPlayers()) {
+            syncPartyAndGuildToPlayer(sp, false, true);
+        }
+    }
+
+    public static void handleBoardPostNote(ServerPlayer sender, String title, String content) {
+        if (title.trim().isEmpty() || content.trim().isEmpty()) return;
+        OfflineMailStorage mail = OfflineMailStorage.get(sender.server);
+        PassportData d = sender.getData(PassportData.PASSPORT);
+        String authorName = d.rpName.isEmpty() ? sender.getName().getString() : d.rpName;
+
+        mail.createPlayerLeaflet(sender.getStringUUID(), authorName, title.trim(), content.trim());
+        sender.sendSystemMessage(Component.literal("§6[Доска Объявлений] §aВаша листовка «§e" + title.trim() + "§a» приколота на городскую доску!"));
+        sender.playNotifySound(SoundEvents.BOOK_PAGE_TURN, SoundSource.MASTER, 1.0f, 1.2f);
+
+        for (ServerPlayer sp : sender.server.getPlayerList().getPlayers()) {
+            syncPartyAndGuildToPlayer(sp, false, true);
+        }
+    }
+
+    public static void handleBoardRemoveNote(ServerPlayer sender, String noteId) {
+        OfflineMailStorage mail = OfflineMailStorage.get(sender.server);
+        OfflineMailStorage.BoardNotice n = mail.getBoardNotices().get(noteId);
+        if (n == null) return;
+        if (n.isPlayerNote && (sender.getStringUUID().equals(n.authorUuid) || sender.hasPermissions(2))) {
+            mail.getBoardNotices().remove(noteId);
+            mail.setDirty();
+            sender.sendSystemMessage(Component.literal("§6[Доска Объявлений] §7Листовка снята с доски."));
+            for (ServerPlayer sp : sender.server.getPlayerList().getPlayers()) {
+                syncPartyAndGuildToPlayer(sp, false, true);
             }
         }
     }
@@ -240,6 +430,13 @@ public class ServerEvents {
                 }
                 guildTag.put("members", mList);
             }
+
+            // Вкладываем все свитки и листовки с Доски Объявлений
+            ListTag noticesList = new ListTag();
+            for (OfflineMailStorage.BoardNotice n : mail.getBoardNotices().values()) {
+                noticesList.add(n.toTag());
+            }
+            guildTag.put("boardNotices", noticesList);
         }
 
         PacketDistributor.sendToPlayer(sp, new PassportNetworking.PartyGuildSyncPayload(partyTag, guildTag));
@@ -265,7 +462,6 @@ public class ServerEvents {
         }
     }
 
-    // --- ОБРАБОТЧИКИ ГРУПП (до 5 человек) ---
     public static void handlePartyInvite(ServerPlayer sender, String targetQuery) {
         String sUuid = sender.getStringUUID();
         PartyInstance party = PLAYER_PARTIES.get(sUuid);
@@ -379,7 +575,6 @@ public class ServerEvents {
             }
         }
 
-        // Если остался только 1 человек (или только боты) и лидер вышел — распускаем
         if (party.members.isEmpty() || (party.members.size() == 1 && !party.members.get(0).startsWith("bot-") && reqUuid.equals(targetUuid))) {
             for (String m : new ArrayList<>(party.members)) {
                 PLAYER_PARTIES.remove(m);
@@ -403,7 +598,6 @@ public class ServerEvents {
         broadcastPartySync(requester.server, party);
     }
 
-    // --- ОБРАБОТЧИКИ СОДРУЖЕСТВ (КЛАНОВ) ---
     public static void handleGuildCreate(ServerPlayer sender, String nameAndTag, String avatarId) {
         OfflineMailStorage mail = OfflineMailStorage.get(sender.server);
         String sUuid = sender.getStringUUID();
@@ -431,7 +625,6 @@ public class ServerEvents {
         guild.memberRanks.put(sUuid, "LEADER");
         guild.chestAllowed.add(sUuid);
 
-        // Автоматически создаем официальную беседу Содружества в Мессенджере!
         OfflineMailStorage.GroupChatInfo chatGroup = new OfflineMailStorage.GroupChatInfo();
         chatGroup.groupId = chatGroupId;
         chatGroup.title = "[" + tag + "] " + name;
@@ -550,7 +743,7 @@ public class ServerEvents {
             if (order[i].equals(current)) idx = i;
         }
 
-        if ("UP".equals(direction) && idx < 2) idx++; // До Офицера (Лидер — уникальный)
+        if ("UP".equals(direction) && idx < 2) idx++;
         else if ("DOWN".equals(direction) && idx > 0) idx--;
 
         guild.memberRanks.put(targetUuid, order[idx]);
@@ -599,7 +792,6 @@ public class ServerEvents {
 
         if (!reqUuid.equals(targetUuid) && !guild.leaderUuid.equals(reqUuid)) return;
 
-        // Если уходит сам Лидер — распускаем содружество
         if (targetUuid.equals(guild.leaderUuid)) {
             Set<String> oldMembers = new HashSet<>(guild.memberRanks.keySet());
             mail.getGuilds().remove(guild.guildId);
@@ -747,6 +939,7 @@ public class ServerEvents {
     @SubscribeEvent
     public static void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer sp) {
+            LAST_PLAYER_POS.remove(sp.getUUID());
             PassportData data = sp.getData(PassportData.PASSPORT);
             String myName = data.rpName.isEmpty() ? sp.getName().getString() : data.rpName;
             String myUuid = sp.getStringUUID();
@@ -824,6 +1017,44 @@ public class ServerEvents {
                 )
         );
 
+        // Команда управления городской валютой (Номами): /nomes add|set <игрок> <сумма>
+        event.getDispatcher().register(
+            Commands.literal("nomes")
+                .requires(source -> source.hasPermission(2))
+                .then(Commands.literal("add")
+                    .then(Commands.argument("target", EntityArgument.player())
+                        .then(Commands.argument("amount", IntegerArgumentType.integer(-100000, 100000))
+                            .executes(ctx -> {
+                                ServerPlayer t = EntityArgument.getPlayer(ctx, "target");
+                                int amt = IntegerArgumentType.getInteger(ctx, "amount");
+                                PassportData d = t.getData(PassportData.PASSPORT);
+                                d.nomes = Math.max(0, d.nomes + amt);
+                                t.setData(PassportData.PASSPORT, d);
+                                syncPlayerDataWithOnlineStatus(t);
+                                ctx.getSource().sendSuccess(() -> Component.literal("§6[Казна Исономии] §aБаланс игрока теперь: §e" + d.nomes + " Номов"), true);
+                                return 1;
+                            })
+                        )
+                    )
+                )
+                .then(Commands.literal("set")
+                    .then(Commands.argument("target", EntityArgument.player())
+                        .then(Commands.argument("amount", IntegerArgumentType.integer(0, 1000000))
+                            .executes(ctx -> {
+                                ServerPlayer t = EntityArgument.getPlayer(ctx, "target");
+                                int amt = IntegerArgumentType.getInteger(ctx, "amount");
+                                PassportData d = t.getData(PassportData.PASSPORT);
+                                d.nomes = amt;
+                                t.setData(PassportData.PASSPORT, d);
+                                syncPlayerDataWithOnlineStatus(t);
+                                ctx.getSource().sendSuccess(() -> Component.literal("§6[Казна Исономии] §aБаланс игрока установлен на: §e" + d.nomes + " Номов"), true);
+                                return 1;
+                            })
+                        )
+                    )
+                )
+        );
+
         event.getDispatcher().register(
             Commands.literal("rep")
                 .requires(source -> source.hasPermission(2))
@@ -860,7 +1091,17 @@ public class ServerEvents {
                         ServerPlayer sp = ctx.getSource().getPlayerOrException();
                         handlePartyInvite(sp, "bot-marfa");
                         handlePartyInvite(sp, "bot-inspector");
-                        sp.sendSystemMessage(Component.literal("§6[Тест] §aСоздана тестовая группа (3/5)! Посмотрите на WoW-фреймы в левом верхнем углу экрана и во вкладке §b[M] -> ГРУППЫ§a!"));
+                        sp.sendSystemMessage(Component.literal("§6[Тест] §aСоздана тестовая группа (3/5)!"));
+                        return 1;
+                    })
+                )
+                .then(Commands.literal("board")
+                    .executes(ctx -> {
+                        ServerPlayer sp = ctx.getSource().getPlayerOrException();
+                        OfflineMailStorage mail = OfflineMailStorage.get(sp.server);
+                        mail.spawnRandomNpcQuest(new Random());
+                        syncPartyAndGuildToPlayer(sp, false, true);
+                        sp.sendSystemMessage(Component.literal("§6[Тест] §aНа доску объявлений повешен новый случайный свиток контракта!"));
                         return 1;
                     })
                 )
@@ -887,7 +1128,7 @@ public class ServerEvents {
                         data.knownProfiles.put(botId, fakePass.toProfileSnapshot(botId, "Viktor_B7", true));
                         syncPlayerDataWithOnlineStatus(sp);
 
-                        sp.sendSystemMessage(Component.literal("§6[Друзья] §eВиктор Градов §fхочет добавить вас в друзья! Откройте меню §b[M] -> ДРУЗЬЯ§f, чтобы принять."));
+                        sp.sendSystemMessage(Component.literal("§6[Друзья] §eВиктор Градов §fхочет добавить вас в друзья!"));
                         sp.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.8f, 1.2f);
                         return 1;
                     })
@@ -931,7 +1172,7 @@ public class ServerEvents {
                         data.knownProfiles.put(bot2, p2.toProfileSnapshot(bot2, "Inspector_V", false));
                         syncPlayerDataWithOnlineStatus(sp);
 
-                        sp.sendSystemMessage(Component.literal("§6[Тест] §aДобавлены 2 тестовых друга: §eМарфа Соколова §a(В сети) и §eАвгуст Вейн §7(Не в сети). Откройте §b[M] -> ДРУЗЬЯ§a!"));
+                        sp.sendSystemMessage(Component.literal("§6[Тест] §aДобавлены 2 тестовых друга!"));
                         return 1;
                     })
                 )
@@ -1001,7 +1242,7 @@ public class ServerEvents {
         );
     }
 
-    private static int changeRep(net.minecraft.commands.CommandSourceStack source, ServerPlayer target, String facId, int amount, boolean add) {
+    public static int changeRep(net.minecraft.commands.CommandSourceStack source, ServerPlayer target, String facId, int amount, boolean add) {
         Faction f = Faction.byId(facId);
         if (f == null) {
             source.sendFailure(Component.literal("§cНеизвестная фракция! Доступны: lower_city, middle_class, intelligentsia, government"));
@@ -1020,7 +1261,6 @@ public class ServerEvents {
         syncPlayerDataWithOnlineStatus(target);
 
         String title = f.getTitle(newVal, data.isFemale());
-        source.sendSuccess(() -> Component.literal("§6[Весы Либры] §fРепутация §e" + target.getName().getString() + " §fс фракцией «" + f.displayName + "» теперь: §b" + newVal + " §7(" + title + ")"), true);
         target.sendSystemMessage(Component.literal("§6[Весы Либры] §7Отношение с «" + f.displayName + "» изменилось: §e" + (newVal > 0 ? "+" : "") + newVal + " §7(Ранг: " + title + ")"));
 
         if (newTier != oldTier) {
