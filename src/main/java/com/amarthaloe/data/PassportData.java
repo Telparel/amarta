@@ -28,9 +28,14 @@ public class PassportData implements INBTSerializable<CompoundTag> {
     public String optional = "";
     public String photoId = "";
 
+    // Городская валюта Исономии — Номы
+    public int nomes = 50; // Стартовый капитал гражданина
+    // Активные взятые контракты с доски: questId -> текущий прогресс
+    public final Map<String, Integer> activeQuests = new HashMap<>();
+
     public final Map<Faction, Integer> reputation = new EnumMap<>(Faction.class);
     public String activeTitleFaction = "";
-    public String guildTag = ""; // Тег содружества (до 4 букв) для чата и Таба
+    public String guildTag = "";
 
     public final Set<String> friends = new HashSet<>();
     public final Set<String> incomingRequests = new HashSet<>();
@@ -67,11 +72,13 @@ public class PassportData implements INBTSerializable<CompoundTag> {
         snap.putString("race", race);
         snap.putString("heightWeight", heightWeight);
         snap.putString("hair", hair);
+        snap.putString("eyes", hair.isEmpty() ? "" : eyes);
         snap.putString("eyes", eyes);
         snap.putString("features", features);
         snap.putString("voice", voice);
         snap.putString("optional", optional);
         snap.putString("photoId", photoId);
+        snap.putInt("nomes", nomes);
         return snap;
     }
 
@@ -90,8 +97,15 @@ public class PassportData implements INBTSerializable<CompoundTag> {
         tag.putString("voice", voice);
         tag.putString("optional", optional);
         tag.putString("photoId", photoId);
+        tag.putInt("nomes", nomes);
         tag.putString("activeTitleFaction", activeTitleFaction);
         tag.putString("guildTag", guildTag);
+
+        CompoundTag questsTag = new CompoundTag();
+        for (Map.Entry<String, Integer> e : activeQuests.entrySet()) {
+            questsTag.putInt(e.getKey(), e.getValue());
+        }
+        tag.put("activeQuests", questsTag);
 
         CompoundTag repTag = new CompoundTag();
         for (Faction f : Faction.values()) {
@@ -136,8 +150,17 @@ public class PassportData implements INBTSerializable<CompoundTag> {
         voice = tag.getString("voice");
         optional = tag.getString("optional");
         photoId = tag.getString("photoId");
+        nomes = tag.contains("nomes") ? tag.getInt("nomes") : 50;
         activeTitleFaction = tag.getString("activeTitleFaction");
         guildTag = tag.getString("guildTag");
+
+        activeQuests.clear();
+        if (tag.contains("activeQuests")) {
+            CompoundTag qTag = tag.getCompound("activeQuests");
+            for (String k : qTag.getAllKeys()) {
+                activeQuests.put(k, qTag.getInt(k));
+            }
+        }
 
         if (tag.contains("reputation")) {
             CompoundTag repTag = tag.getCompound("reputation");
