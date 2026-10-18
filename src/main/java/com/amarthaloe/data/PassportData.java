@@ -1,7 +1,6 @@
 package com.amarthaloe.data;
 
 import com.amarthaloe.rpg.Faction;
-import com.amarthaloe.rpg.LoreBookRegistry;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -31,8 +30,7 @@ public class PassportData implements INBTSerializable<CompoundTag> {
 
     public int nomes = 50;
     public final Map<String, Integer> activeQuests = new HashMap<>();
-
-    // Открытые игроком книги на книжной полке во вкладке ИНФОРМАЦИЯ
+    // Открытые секретные книги на книжной полке во вкладке ИНФОРМАЦИЯ
     public final Set<String> unlockedBooks = new HashSet<>();
 
     public final Map<Faction, Integer> reputation = new EnumMap<>(Faction.class);
@@ -48,13 +46,6 @@ public class PassportData implements INBTSerializable<CompoundTag> {
         for (Faction f : Faction.values()) {
             reputation.put(f, 0);
         }
-        for (LoreBookRegistry b : LoreBookRegistry.values()) {
-            if (b.defaultUnlocked) unlockedBooks.add(b.id);
-        }
-    }
-
-    public boolean isBookUnlocked(LoreBookRegistry book) {
-        return book.defaultUnlocked || unlockedBooks.contains(book.id);
     }
 
     public int getRep(Faction f) {
@@ -175,9 +166,6 @@ public class PassportData implements INBTSerializable<CompoundTag> {
         }
 
         unlockedBooks.clear();
-        for (LoreBookRegistry b : LoreBookRegistry.values()) {
-            if (b.defaultUnlocked) unlockedBooks.add(b.id);
-        }
         if (tag.contains("unlockedBooks")) {
             ListTag bList = tag.getList("unlockedBooks", Tag.TAG_STRING);
             for (int i = 0; i < bList.size(); i++) unlockedBooks.add(bList.getString(i));
