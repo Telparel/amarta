@@ -32,7 +32,7 @@ public class PassportNetworking {
 
     public static CompoundTag CLIENT_PARTY_DATA = new CompoundTag();
     public static CompoundTag CLIENT_GUILD_DATA = new CompoundTag();
-    public static CompoundTag CLIENT_BOARD_DATA = new CompoundTag(); // Свитки и листовки на доске
+    public static CompoundTag CLIENT_BOARD_DATA = new CompoundTag();
 
     private static final Map<String, byte[][]> SERVER_INCOMING_CHUNKS = new HashMap<>();
 
@@ -391,7 +391,6 @@ public class PassportNetworking {
                 ServerEvents.syncPlayerDataWithOnlineStatus(sender);
             }
 
-            // --- СИСТЕМА ГРУПП ---
             case "INVITE_PARTY" -> ServerEvents.handlePartyInvite(sender, targetStr);
             case "PARTY_ACCEPT" -> ServerEvents.handlePartyAccept(sender, targetStr);
             case "PARTY_DECLINE" -> ServerEvents.handlePartyDecline(sender);
@@ -399,7 +398,6 @@ public class PassportNetworking {
             case "PARTY_KICK" -> ServerEvents.handlePartyLeaveOrKick(sender, targetStr);
             case "PARTY_LEAVE" -> ServerEvents.handlePartyLeaveOrKick(sender, senderUuid);
 
-            // --- СИСТЕМА СОДРУЖЕСТВ ---
             case "GUILD_CREATE" -> ServerEvents.handleGuildCreate(sender, targetStr, extra);
             case "GUILD_INVITE" -> ServerEvents.handleGuildInvite(sender, targetStr);
             case "GUILD_ACCEPT" -> ServerEvents.handleGuildAccept(sender, targetStr);
@@ -411,11 +409,13 @@ public class PassportNetworking {
             case "GUILD_KICK" -> ServerEvents.handleGuildKickOrLeave(sender, targetStr);
             case "GUILD_LEAVE" -> ServerEvents.handleGuildKickOrLeave(sender, senderUuid);
 
-            // --- ДОСКА ОБЪЯВЛЕНИЙ И КОНТРАКТОВ ---
             case "BOARD_ACCEPT_QUEST" -> ServerEvents.handleBoardAcceptQuest(sender, targetStr);
             case "BOARD_COMPLETE_QUEST" -> ServerEvents.handleBoardCompleteQuest(sender, targetStr);
             case "BOARD_POST_NOTE" -> ServerEvents.handleBoardPostNote(sender, targetStr, extra);
             case "BOARD_REMOVE_NOTE" -> ServerEvents.handleBoardRemoveNote(sender, targetStr);
+
+            // Помещение найденной в игре книги на книжную полку
+            case "SHELF_INSERT_BOOK" -> ServerEvents.handleShelfInsertBook(sender);
 
             case "MARK_READ" -> {
                 mail.markAsRead(senderUuid, targetStr);
