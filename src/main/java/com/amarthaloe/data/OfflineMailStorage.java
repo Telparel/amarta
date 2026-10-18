@@ -137,24 +137,23 @@ public class OfflineMailStorage extends SavedData {
         }
     }
 
-    // --- СВИТОК ЗАКАЗА ИЛИ ЛИСТОВКА ИГРОКА НА ДОСКЕ ОБЪЯВЛЕНИЙ ---
     public static class BoardNotice {
         public String id = "";
         public boolean isPlayerNote = false;
         public String authorName = "";
         public String authorUuid = "";
-        public String factionId = "";      // lower_city, middle_class, intelligentsia, government
+        public String factionId = "";
         public String title = "";
         public String description = "";
-        public String questType = "";      // KILL, GATHER, VISIT, NOTE
-        public String targetId = "";       // minecraft:zombie, minecraft:iron_ingot, patrol_distance и т.д.
-        public String targetDisplay = "";  // Наглядное описание цели
+        public String questType = "";
+        public String targetId = "";
+        public String targetDisplay = "";
         public int requiredCount = 1;
-        public int difficulty = 1;         // 1..3 звезды
+        public int difficulty = 1;
         public int rewardRep = 10;
         public int rewardNomes = 25;
-        public int boardX = 40;            // Координата X на большом полотне доски (0..740)
-        public int boardY = 40;            // Координата Y на большом полотне доски (0..440)
+        public int boardX = 40;
+        public int boardY = 40;
 
         public CompoundTag toTag() {
             CompoundTag t = new CompoundTag();
@@ -216,50 +215,63 @@ public class OfflineMailStorage extends SavedData {
 
     private record QuestTemplate(Faction faction, String title, String desc, String type, String targetId, String targetDisplay, int count, int diff, int rep, int nomes) {}
 
+    // УСЛОЖНЕННЫЙ ПУЛ КОНТРАКТОВ ИСОНОМИИ (1..3 ЗВЕЗДЫ)
     private static final List<QuestTemplate> QUEST_POOL = List.of(
-        // НИЖНИЙ ГОРОД
-        new QuestTemplate(Faction.LOWER_CITY, "Зачистка затопленных подвалов",
-            "В подвалах под пятой хрущёвкой снова расплодились мертвецы. Ребята боятся спускаться за трубами. Упокой тварей — заплатим честно.",
-            "KILL", "minecraft:zombie", "Убить Зомби", 6, 1, 15, 35),
-        new QuestTemplate(Faction.LOWER_CITY, "Сырьё для подпольной кухни",
-            "Пайки от Среднего Класса снова урезали. Принеси свежей (или хотя бы условно съедобной) плоти и костей для варева во дворах.",
-            "GATHER", "minecraft:rotten_flesh", "Сдать Гнилую плоть", 16, 1, 12, 25),
-        new QuestTemplate(Faction.LOWER_CITY, "Обход дальних пустырей",
-            "Нужно проверить старые тропы контрабандистов вокруг жилмассива. Пройди маршрут пешком и убедись, что патрулей нет.",
-            "VISIT", "patrol_blocks", "Пройти блоков по миру", 250, 2, 20, 50),
+        // --- НИЖНИЙ ГОРОД ---
+        new QuestTemplate(Faction.LOWER_CITY, "Тотальная зачистка коллекторов",
+            "В коллекторах под жилым массивом прорвало старую дамбу, и оттуда хлынули орды мертвецов. Перебей не менее тридцати тварей, иначе подвалы не отстоять.",
+            "KILL", "minecraft:zombie", "Убить Зомби", 30, 1, 15, 45),
+        new QuestTemplate(Faction.LOWER_CITY, "Оптовая поставка для трущоб",
+            "Голод в нижних ярусах усиливается. Нам нужна крупная партия органики и плоти для переработки на технический жир и приманки.",
+            "GATHER", "minecraft:rotten_flesh", "Сдать Гнилую плоть", 64, 1, 15, 40),
+        new QuestTemplate(Faction.LOWER_CITY, "Дальний рейд контрабандистов",
+            "Нужно протоптать безопасный обходной маршрут вокруг блокпостов Наместников. Предстоит долгий пеший переход по пустошам.",
+            "VISIT", "patrol_blocks", "Пройти блоков по миру", 2500, 2, 25, 70),
+        new QuestTemplate(Faction.LOWER_CITY, "Охота на болотных ведьм",
+            "В заброшенных хрущёвках на окраине обосновались ведьмы — травят колодцы и пугают старьёвщиков. Ликвидируй их всех до единой.",
+            "KILL", "minecraft:witch", "Убить Ведьм", 10, 3, 45, 130),
 
-        // СРЕДНИЙ КЛАСС
-        new QuestTemplate(Faction.MIDDLE_CLASS, "Сверхплановая норма угля",
-            "Котельная ЖЭК-4 на грани остановки! Если батареи в панельках остынут, с нас снимут трудодни. Срочно требуется партия угля.",
-            "GATHER", "minecraft:coal", "Сдать Уголь", 20, 1, 15, 40),
-        new QuestTemplate(Faction.MIDDLE_CLASS, "Металл для ремонта труб",
-            "Магистраль в 3-м микрорайоне дала течь. Комбинату срочно нужны железные слитки для сварки заплаток. Работа сдельная!",
-            "GATHER", "minecraft:iron_ingot", "Сдать Железные слитки", 10, 2, 25, 65),
-        new QuestTemplate(Faction.MIDDLE_CLASS, "Паутина в вентиляционных шахтах",
-            "В шахтах лифтов завелись гигантские пауки, срывают график смены! Истребите паразитов во имя Трудового Равенства.",
-            "KILL", "minecraft:spider", "Убить Пауков", 5, 2, 20, 55),
+        // --- СРЕДНИЙ КЛАСС ---
+        new QuestTemplate(Faction.MIDDLE_CLASS, "Двойная норма угля для ТЭЦ",
+            "ТЭЦ-2 работает на пределе износа! Чтобы не заморозить спальные районы Исономии, требуется сдать два полных стака каменного угля.",
+            "GATHER", "minecraft:coal", "Сдать Уголь", 128, 1, 15, 50),
+        new QuestTemplate(Faction.MIDDLE_CLASS, "Тяжелый металл для Пятилетки",
+            "Литейный цех остановил конвейер из-за нехватки сырья. Требуется крупная партия железных слитков для выполнения квартального плана.",
+            "GATHER", "minecraft:iron_ingot", "Сдать Железные слитки", 64, 2, 30, 85),
+        new QuestTemplate(Faction.MIDDLE_CLASS, "Дезинсекция вентиляционных шахт",
+            "Шахты метрополитена и старых заводов кишат гигантскими пауками. Рабочие отказываются выходить в ночную смену. Зачистите гнезда!",
+            "KILL", "minecraft:spider", "Убить Пауков", 35, 2, 25, 75),
+        new QuestTemplate(Faction.MIDDLE_CLASS, "Алмазные резцы для буровых",
+            "Для проходческих щитов метростроя Исономии срочно требуются сверхпрочные алмазы. Контракт высокой сложности, оплата по высшему разряду.",
+            "GATHER", "minecraft:diamond", "Сдать Алмазы", 16, 3, 50, 150),
 
-        // ИНТЕЛЛИГЕНЦИЯ
-        new QuestTemplate(Faction.INTELLIGENTSIA, "Костные образцы для НИИ-7",
-            "Лаборатория биомеханики изучает влияние постапокалиптической радиации на скелетов. Требуется ликвидировать особи для отчета.",
-            "KILL", "minecraft:skeleton", "Убить Скелетов", 7, 2, 25, 60),
-        new QuestTemplate(Faction.INTELLIGENTSIA, "Медные проводники для ЭВМ",
-            "Вычислительная машина Архива перегорела при расчете баланса пайков. Принесите медные слитки для замены контуров.",
-            "GATHER", "minecraft:copper_ingot", "Сдать Медные слитки", 14, 1, 15, 45),
-        new QuestTemplate(Faction.INTELLIGENTSIA, "Топографическая разведка сектора",
-            "Для обновления карт Исономии требуется пеший замер периметра. Пройдите указанную дистанцию с замером координат.",
-            "VISIT", "patrol_blocks", "Пройти блоков в разведке", 400, 3, 35, 85),
+        // --- ИНТЕЛЛИГЕНЦИЯ ---
+        new QuestTemplate(Faction.INTELLIGENTSIA, "Массовый сбор костных образцов",
+            "Отдел радиологии НИИ-7 проводит масштабное исследование мутаций. Требуется уничтожить крупную популяцию скелетов в окрестностях.",
+            "KILL", "minecraft:skeleton", "Убить Скелетов", 40, 2, 30, 80),
+        new QuestTemplate(Faction.INTELLIGENTSIA, "Партия меди для главного Архива",
+            "Для модернизации телеграфной и вычислительной сети Исономии необходима полная партия очищенных медных слитков.",
+            "GATHER", "minecraft:copper_ingot", "Сдать Медные слитки", 64, 1, 15, 50),
+        new QuestTemplate(Faction.INTELLIGENTSIA, "Золотые контакты для ЭВМ «Весы»",
+            "Высокоточные реле центральной ЭВМ требуют некорродирующего металла. Принесите 32 золотых слитка в лабораторию Госплана.",
+            "GATHER", "minecraft:gold_ingot", "Сдать Золотые слитки", 32, 2, 30, 90),
+        new QuestTemplate(Faction.INTELLIGENTSIA, "Изучение пространственных аномалий",
+            "В районе разрушенных НИИ замечены странники Края (Эндермены), искажающие метрику пространства. Устраните 20 особей для стабилизации фона.",
+            "KILL", "minecraft:enderman", "Убить Эндерменов", 20, 3, 50, 140),
 
-        // ПРАВИТЕЛЬСТВО (НАМЕСТНИКИ ЛИБРЫ)
-        new QuestTemplate(Faction.GOVERNMENT, "Контракт №404: Ликвидация подрывников",
-            "Взрывоопасные мутанты (Криперы) угрожают целостности муниципальных построек Либры. Контракт требует их полного устранения.",
-            "KILL", "minecraft:creeper", "Убить Криперов", 4, 3, 40, 100),
-        new QuestTemplate(Faction.GOVERNMENT, "Продналог в Фонд Равенства",
-            "Согласно указу Барона Контрактов, каждый сектор обязан пополнить неприкосновенный зерновой резерв свежим хлебом.",
-            "GATHER", "minecraft:bread", "Сдать Хлеб", 12, 2, 25, 70),
-        new QuestTemplate(Faction.GOVERNMENT, "Инспекция границ Юрисдикции",
-            "Проведите официальный патрульный обход территории Исономии. Любое отклонение от протокола недопустимо.",
-            "VISIT", "patrol_blocks", "Пройти блоков в патруле", 500, 3, 45, 110)
+        // --- ПРАВИТЕЛЬСТВО (НАМЕСТНИКИ ЛИБРЫ) ---
+        new QuestTemplate(Faction.GOVERNMENT, "Особый Протокол: Подрывники",
+            "Диверсионная угроза! Скопления Криперов подрывают опоры ЛЭП и муниципальные стены. Барон Либра требует уничтожить 30 особей.",
+            "KILL", "minecraft:creeper", "Убить Криперов", 30, 3, 50, 145),
+        new QuestTemplate(Faction.GOVERNMENT, "Государственный зерновой резерв",
+            "Во исполнение Декрета о Равенстве Пайков каждый подрядчик обязан сдать крупную партию свежего хлеба в распределитель Наместников.",
+            "GATHER", "minecraft:bread", "Сдать Хлеб", 64, 2, 25, 80),
+        new QuestTemplate(Faction.GOVERNMENT, "Валютная ревизия Контрактов",
+            "Канцелярия Барона Контрактов изымает из теневого оборота драгоценные камни. Сдайте партию изумрудов в казну Юрисдикции.",
+            "GATHER", "minecraft:emerald", "Сдать Изумруды", 48, 3, 55, 160),
+        new QuestTemplate(Faction.GOVERNMENT, "Большой инспекционный марш-бросок",
+            "Проведите полный пеший дозор дальних рубежей Исономии. Только безупречная выносливость докажет вашу верность Закону Равенства.",
+            "VISIT", "patrol_blocks", "Пройти блоков в патруле", 5000, 3, 60, 170)
     );
 
     private final Map<String, List<String>> chatHistories = new HashMap<>();
@@ -273,8 +285,10 @@ public class OfflineMailStorage extends SavedData {
         return boardNotices;
     }
 
-    // Автоматически поддерживает на доске не менее 10 разнообразных НПС-заказов на большом полотне
     public void ensureNpcQuestsPopulated() {
+        // Удаляем старые слишком легкие квесты (где требовалось меньше 10 единиц, кроме редких 3-звездочных)
+        boardNotices.values().removeIf(n -> !n.isPlayerNote && n.requiredCount < 10);
+
         long npcCount = boardNotices.values().stream().filter(n -> !n.isPlayerNote).count();
         Random rand = new Random();
         while (npcCount < 10) {
@@ -325,7 +339,6 @@ public class OfflineMailStorage extends SavedData {
         return n;
     }
 
-    // Подбирает свободную точку на большом холсте доски (850x550), чтобы свитки не перекрывали друг друга
     private void findFreeBoardPosition(BoardNotice notice, Random rand) {
         for (int attempt = 0; attempt < 40; attempt++) {
             int x = 25 + rand.nextInt(700);
