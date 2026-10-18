@@ -5,6 +5,7 @@ import com.amarthaloe.client.PartyHudOverlay;
 import com.amarthaloe.data.PassportData;
 import com.amarthaloe.network.PassportNetworking;
 import com.amarthaloe.rpg.Faction;
+import com.amarthaloe.rpg.LoreBookRegistry;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.EditBox;
@@ -15,6 +16,7 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.sounds.SoundEvents;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -58,13 +60,18 @@ public class AmarthaloeMenuScreen extends Screen {
     private String pendingGuildAvatarId = "";
     private int guildMembersOffset = 0;
 
-    // Доска объявлений (Ведьмак 3 стиль: панорамирование 2D-холста 850x550)
+    // Доска объявлений
     private float boardPanX = 0.0f;
     private float boardPanY = 0.0f;
     private boolean isDraggingBoard = false;
-    private String expandedNoticeId = null;     // Развернутый свиток контракта или листовки
-    private boolean writingLeafletMode = false; // Режим публикации своей листовки
+    private String expandedNoticeId = null;
+    private boolean writingLeafletMode = false;
     private EditBox leafletTitleBox, leafletBodyBox;
+
+    // Книжная полка (ИНФОРМАЦИЯ)
+    private String openedBookId = null;
+    private int bookPage = 0;
+    private int totalBookPages = 1;
 
     // Прокрутка мессенджера
     private float chatScrollOffset = 0.0f;
@@ -90,7 +97,6 @@ public class AmarthaloeMenuScreen extends Screen {
 
         menuButtons.clear();
 
-        // 10 аккуратных вкладок в левой колонке (высота 19, шаг 22 — идеально входят в высоту 275)
         String[] tabs = {
             "ИГРОК", "ТИТУЛЫ", "РЕПУТАЦИЯ", "ДРУЗЬЯ", "ГРУППЫ",
             "СОДРУЖЕСТВА", "СООБЩЕНИЯ", "ОБЪЯВЛЕНИЯ", "ИНФОРМАЦИЯ", "НАСТРОЙКИ"
@@ -116,6 +122,7 @@ public class AmarthaloeMenuScreen extends Screen {
                 this.creatingGroupMode = false;
                 this.expandedNoticeId = null;
                 this.writingLeafletMode = false;
+                this.openedBookId = null;
                 this.zoomedImageId = null;
                 this.rebuildWidgets();
             });
@@ -133,7 +140,56 @@ public class AmarthaloeMenuScreen extends Screen {
             case "СОДРУЖЕСТВА" -> initGuildsTab();
             case "СООБЩЕНИЯ" -> initMessagesTab();
             case "ОБЪЯВЛЕНИЯ" -> initBoardTab();
+            case "ИНФОРМАЦИЯ" -> initInfoBookshelfTab();
             case "НАСТРОЙКИ" -> initSettingsTab();
+        }
+    }
+
+    private void initInfoBookshelfTab() {
+        int winX = leftPos + 110;
+        int winY = topPos + 8;
+
+        if (openedBookId != null) {
+            LoreBookRegistry.LoreBook book = LoreBookRegistry.byId(openedBookId);
+            if (book == null) {
+                openedBookId = null;
+                return;
+            }
+
+            List<FormattedCharSequence> lines = this.font.split(Component.literal(book.content()), 286);
+            int linesPerPage = 13;
+            this.totalBookPages = Math.max(1, (int) Math.ceil((double) lines.size() / linesPerPage));
+            this.bookPage = Math.clamp(this.bookPage, 0, this.totalBookPages - 1);
+
+            DarkButton backToShelfBtn = new DarkButton(winX + 18, winY + ySize - 42, 118, 20, Component.literal("◄ Назад к полке"), (b) -> {
+                openedBookId = null;
+                this.rebuildWidgets();
+            });
+            DarkButton prevPageBtn = new DarkButton(winX + 160, winY + ySize - 42, 42, 20, Component.literal("◄"), (b) -> {
+                if (bookPage > 0) {
+                    bookPage--;
+                    if (Minecraft.getInstance().player != null) {
+                        Minecraft.getInstance().player.playSound(SoundEvents.BOOK_PAGE_TURN, 0.8f, 1.0f);
+                    }
+                    this.rebuildWidgets();
+                }
+            });
+            prevPageBtn.active = (bookPage > 0);
+
+            DarkButton nextPageBtn = new DarkButton(winX + 282, winY + ySize - 42, 42, 20, Component.literal("►"), (b) -> {
+                if (bookPage < totalBookPages - 1) {
+                    bookPage++;
+                    if (Minecraft.getInstance().player != null) {
+                        Minecraft.getInstance().player.playSound(SoundEvents.BOOK_PAGE_TURN, 0.8f, 1.0f);
+                    }
+                    this.rebuildWidgets();
+                }
+            });
+            nextPageBtn.active = (bookPage < totalBookPages - 1);
+
+            this.addRenderableWidget(backToShelfBtn);
+            this.addRenderableWidget(prevPageBtn);
+            this.addRenderableWidget(nextPageBtn);
         }
     }
 
@@ -143,7 +199,6 @@ public class AmarthaloeMenuScreen extends Screen {
         int winY = topPos + 8;
         PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
 
-        // 1. Если открыто написание собственной листовки игрока
         if (writingLeafletMode) {
             leafletTitleBox = createField(winX + 20, winY + 55, 290, 18, "", 36, "Заголовок листовки (например: Куплю уголь / Набор в клан)...");
             leafletBodyBox = createField(winX + 20, winY + 92, 290, 18, "", 160, "Текст объявления для жителей Исономии...");
@@ -166,7 +221,6 @@ public class AmarthaloeMenuScreen extends Screen {
             return;
         }
 
-        // 2. Если игрок кликнул на свиток и развернул его во весь экран
         if (expandedNoticeId != null) {
             CompoundTag notice = findNoticeById(expandedNoticeId);
             if (notice == null) {
@@ -216,7 +270,6 @@ public class AmarthaloeMenuScreen extends Screen {
             }
         }
 
-        // 3. Верхняя кнопка публикации своей листовки и центрирования доски
         DarkButton writeBtn = new DarkButton(winX + 208, winY + 7, 124, 16, Component.literal("+ Написать листовку"), (b) -> {
             writingLeafletMode = true;
             this.rebuildWidgets();
@@ -820,11 +873,8 @@ public class AmarthaloeMenuScreen extends Screen {
             case "СОДРУЖЕСТВА" -> renderGuildsContent(guiGraphics, mainWinX, mainWinY);
             case "СООБЩЕНИЯ" -> renderMessagesContent(guiGraphics, mainWinX, mainWinY);
             case "ОБЪЯВЛЕНИЯ" -> renderBoardContent(guiGraphics, mainWinX, mainWinY, mouseX, mouseY);
+            case "ИНФОРМАЦИЯ" -> renderInfoBookshelfContent(guiGraphics, mainWinX, mainWinY, mouseX, mouseY);
             case "НАСТРОЙКИ" -> renderSettingsContent(guiGraphics, mainWinX, mainWinY);
-            default -> {
-                guiGraphics.drawString(this.font, "РАЗДЕЛ: " + currentTab, mainWinX + 15, mainWinY + 15, 0xFFE0C068);
-                guiGraphics.drawString(this.font, "Модуль в разработке...", mainWinX + 15, mainWinY + 35, 0xFF777777);
-            }
         }
 
         if (zoomedImageId != null) {
@@ -851,7 +901,128 @@ public class AmarthaloeMenuScreen extends Screen {
         }
     }
 
-    // --- ОТРИСОВКА ДОСКИ ОБЪЯВЛЕНИЙ В СТИЛЕ ВЕДЬМАКА 3 ---
+    // --- ОТРИСОВКА КНИЖНОЙ ПОЛКИ ВАВИЛОНСКОЙ БИБЛИОТЕКИ И ЧТЕНИЯ КНИГ ---
+    private void renderInfoBookshelfContent(GuiGraphics g, int winX, int winY, int mouseX, int mouseY) {
+        if (Minecraft.getInstance().player == null) return;
+        PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
+
+        g.drawString(this.font, "АРХИВ ВАВИЛОНСКОЙ БИБЛИОТЕКИ ЛИБРЫ", winX + 12, winY + 9, 0xFFE0C068);
+
+        // Режим чтения открытой книги
+        if (openedBookId != null) {
+            LoreBookRegistry.LoreBook book = LoreBookRegistry.byId(openedBookId);
+            if (book != null) {
+                int bx = winX + 14;
+                int by = winY + 24;
+                int bw = 314;
+                int bh = ySize - 72;
+
+                // Темно-золотистый переплет и пергаментный разворот книги
+                g.fill(bx - 2, by - 2, bx + bw + 2, by + bh + 2, book.spineColor());
+                g.fill(bx, by, bx + bw, by + bh, 0xFF1B1612);
+                g.renderOutline(bx, by, bw, bh, book.accentColor());
+
+                g.drawCenteredString(this.font, book.fullTitle(), bx + bw / 2, by + 8, book.accentColor());
+                g.drawCenteredString(this.font, "§7§o" + book.subtitle(), bx + bw / 2, by + 19, 0xFFAAAAAA);
+                g.fill(bx + 14, by + 30, bx + bw - 14, by + 31, 0xFF5A4832);
+
+                List<FormattedCharSequence> lines = this.font.split(Component.literal(book.content()), bw - 28);
+                int linesPerPage = 13;
+                int startLine = bookPage * linesPerPage;
+                int endLine = Math.min(lines.size(), startLine + linesPerPage);
+
+                int ly = by + 37;
+                for (int i = startLine; i < endLine; i++) {
+                    g.drawString(this.font, lines.get(i), bx + 14, ly, 0xFFE6DEC8);
+                    ly += 11;
+                }
+
+                String pageIndicator = "Страница " + (bookPage + 1) + " из " + totalBookPages;
+                g.drawCenteredString(this.font, pageIndicator, winX + 242, winY + ySize - 36, 0xFFE0C068);
+                return;
+            }
+        }
+
+        // Режим просмотра Книжной Полки (2 яруса по 7 книг)
+        int unlockedSecrets = data.unlockedBooks.size();
+        g.drawString(this.font, "§7Тайные тома: §e" + unlockedSecrets + "/5", winX + 240, winY + 9, 0xFFFFFFFF);
+
+        int shelfX = winX + 12;
+        int shelfW = 318;
+        int[] rowY = {winY + 34, winY + 136};
+        int shelfH = 84;
+
+        LoreBookRegistry.LoreBook hoveredBook = null;
+        boolean hoveredLocked = false;
+
+        for (int row = 0; row < 2; row++) {
+            int sy = rowY[row];
+            // Ниша книжного шкафа из темного мореного дуба
+            g.fill(shelfX, sy, shelfX + shelfW, sy + shelfH, 0xFF0E0A07);
+            g.renderOutline(shelfX, sy, shelfW, shelfH, 0xFF3E2A18);
+            // Массивная деревянная доска-полка снизу яруса
+            g.fill(shelfX - 2, sy + shelfH, shelfX + shelfW + 2, sy + shelfH + 7, 0xFF4A311B);
+            g.renderOutline(shelfX - 2, sy + shelfH, shelfW + 4, 7, 0xFF2B1B0E);
+
+            for (int col = 0; col < 7; col++) {
+                int idx = row * 7 + col;
+                if (idx >= LoreBookRegistry.BOOKS.size()) break;
+
+                LoreBookRegistry.LoreBook book = LoreBookRegistry.BOOKS.get(idx);
+                boolean isUnlocked = !book.secretByDefault() || data.unlockedBooks.contains(book.id());
+
+                int bx = shelfX + 7 + col * 44;
+                int by = sy + 6;
+                int bw = 40;
+                int bh = shelfH - 7;
+
+                boolean hovered = mouseX >= bx && mouseX <= bx + bw && mouseY >= by && mouseY <= by + bh;
+                if (hovered) {
+                    hoveredBook = book;
+                    hoveredLocked = !isUnlocked;
+                }
+
+                if (isUnlocked) {
+                    // Стоящий на полке кожаный фолиант с тиснением (приподнимается при наведении)
+                    int lift = hovered ? -3 : 0;
+                    g.fill(bx + 2, by + 2, bx + bw + 2, by + bh, 0x88000000);
+                    g.fill(bx, by + lift, bx + bw, by + bh + lift, book.spineColor());
+                    g.renderOutline(bx, by + lift, bw, bh, hovered ? 0xFFFFD700 : book.accentColor());
+
+                    // Декоративные золотые полоски переплета сверху и снизу корешка
+                    g.fill(bx + 2, by + 5 + lift, bx + bw - 2, by + 7 + lift, book.accentColor());
+                    g.fill(bx + 2, by + bh - 7 + lift, bx + bw - 2, by + bh - 5 + lift, book.accentColor());
+
+                    // Емкое название на корешке книги
+                    List<FormattedCharSequence> spineLines = this.font.split(Component.literal(book.spineTitle()), bw - 4);
+                    int textY = by + 16 + lift;
+                    for (int l = 0; l < Math.min(4, spineLines.size()); l++) {
+                        int lw = this.font.width(spineLines.get(l));
+                        g.drawString(this.font, spineLines.get(l), bx + (bw - lw) / 2, textY, 0xFFFFFFFF);
+                        textY += 10;
+                    }
+                } else {
+                    // Пустое пыльное место на полке для еще не найденного секретного тома
+                    g.fill(bx, by + 4, bx + bw, by + bh, 0x44181818);
+                    g.renderOutline(bx, by + 4, bw, bh - 4, hovered ? 0xFFAA4444 : 0xFF28221D);
+                    g.drawCenteredString(this.font, "§8?", bx + bw / 2, by + 20, 0xFF555555);
+                    g.drawCenteredString(this.font, "§8Пусто", bx + bw / 2, by + 34, 0xFF444444);
+                }
+            }
+        }
+
+        // Информационная строка в самом низу под книжным шкафом
+        if (hoveredBook != null) {
+            if (!hoveredLocked) {
+                g.drawString(this.font, "§6📖 " + hoveredBook.fullTitle() + " §8(Нажмите ЛКМ, чтобы открыть)", winX + 12, winY + ySize - 24, 0xFFFFFFFF);
+            } else {
+                g.drawString(this.font, "§c🔒 Место под том «" + hoveredBook.spineTitle() + "»: §7" + hoveredBook.unlockHint(), winX + 12, winY + ySize - 24, 0xFFFFFFFF);
+            }
+        } else {
+            g.drawString(this.font, "§8Выберите книгу на полке для чтения. Скрытые тома добываются особыми заказами с Доски.", winX + 12, winY + ySize - 24, 0xFF888888);
+        }
+    }
+
     private void renderBoardContent(GuiGraphics g, int winX, int winY, int mouseX, int mouseY) {
         if (Minecraft.getInstance().player == null) return;
         PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
@@ -866,7 +1037,6 @@ public class AmarthaloeMenuScreen extends Screen {
             return;
         }
 
-        // Если развернут конкретный свиток заказа или листовки
         if (expandedNoticeId != null) {
             CompoundTag notice = findNoticeById(expandedNoticeId);
             if (notice != null) {
@@ -875,18 +1045,15 @@ public class AmarthaloeMenuScreen extends Screen {
             }
         }
 
-        // Область интерактивной деревянной доски (можно тянуть мышкой!)
         int viewX = winX + 8;
         int viewY = winY + 26;
         int viewW = 326;
         int viewH = ySize - 48;
 
-        // Фон темного дерева доски
         g.fill(viewX, viewY, viewX + viewW, viewY + viewH, 0xFF1B140E);
 
         g.enableScissor(viewX + 1, viewY + 1, viewX + viewW - 1, viewY + viewH - 1);
 
-        // Рисуем текстурные доски/плиты на фоне, которые сдвигаются вместе с панорамированием (boardPanX, boardPanY)
         int canvasW = 850;
         int canvasH = 550;
         int originX = viewX - (int) boardPanX;
@@ -899,7 +1066,6 @@ public class AmarthaloeMenuScreen extends Screen {
             g.fill(originX, originY + gy, originX + canvasW, originY + gy + 1, 0x22000000);
         }
 
-        // Рисуем все приколотые свитки контрактов и листовки игроков
         if (PassportNetworking.CLIENT_BOARD_DATA.contains("boardNotices")) {
             ListTag notices = PassportNetworking.CLIENT_BOARD_DATA.getList("boardNotices", Tag.TAG_COMPOUND);
             for (int i = 0; i < notices.size(); i++) {
@@ -914,30 +1080,26 @@ public class AmarthaloeMenuScreen extends Screen {
                 boolean isPlayerNote = n.getBoolean("isPlayerNote");
                 String id = n.getString("id");
                 boolean isAccepted = data.activeQuests.containsKey(id);
+                boolean hasBookReward = !n.getString("rewardBookId").isEmpty();
                 boolean hovered = mouseX >= nx && mouseX <= nx + nw && mouseY >= ny && mouseY <= ny + nh
                         && mouseX >= viewX && mouseX <= viewX + viewW && mouseY >= viewY && mouseY <= viewY + viewH;
 
-                // Тень под свитком
                 g.fill(nx + 3, ny + 3, nx + nw + 3, ny + nh + 3, 0x88000000);
 
-                // Пергаментная бумага (чуть светлее при наведении)
                 int paperCol = isPlayerNote ? (hovered ? 0xFFE5EEF5 : 0xFFD0DCE5) : (hovered ? 0xFFF5E6C4 : 0xFFE2CFA5);
                 g.fill(nx, ny, nx + nw, ny + nh, paperCol);
 
-                // Верхняя и нижняя деревянные планки свитка
                 g.fill(nx - 2, ny, nx + nw + 2, ny + 4, 0xFF4A3219);
                 g.fill(nx - 2, ny + nh - 3, nx + nw + 2, ny + nh, 0xFF4A3219);
 
-                // Сургучная печать фракции (или синяя булавка для листовки игрока)
                 int sealColor = 0xFF2B65EC;
                 if (!isPlayerNote) {
                     Faction f = Faction.byId(n.getString("factionId"));
                     if (f != null) sealColor = f.color;
                 }
                 g.fill(nx + nw / 2 - 5, ny + 2, nx + nw / 2 + 5, ny + 10, sealColor);
-                g.renderOutline(nx, ny, nw, nh, isAccepted ? 0xFF22AA22 : (hovered ? 0xFFFFD700 : 0xFF6B5335));
+                g.renderOutline(nx, ny, nw, nh, isAccepted ? 0xFF22AA22 : (hasBookReward ? 0xFFB388EB : (hovered ? 0xFFFFD700 : 0xFF6B5335)));
 
-                // Заголовок свитка (темными чернилами по пергаменту)
                 String title = n.getString("title");
                 List<FormattedCharSequence> lines = this.font.split(Component.literal(title), nw - 8);
                 int ty = ny + 13;
@@ -946,13 +1108,13 @@ public class AmarthaloeMenuScreen extends Screen {
                     ty += 9;
                 }
 
-                // Нижняя подпись на свитке: сложность/награда или имя автора
                 if (isPlayerNote) {
                     g.drawString(this.font, "От: " + n.getString("authorName"), nx + 4, ny + nh - 14, 0xFF2B4C7E, false);
                 } else {
                     int diff = n.getInt("difficulty");
                     String stars = "★".repeat(Math.max(1, diff)) + "☆".repeat(Math.max(0, 3 - diff));
-                    g.drawString(this.font, stars + " +" + n.getInt("rewardNomes") + "Н", nx + 4, ny + nh - 14, 0xFF6E260E, false);
+                    String suffix = hasBookReward ? " +📖Том" : " +" + n.getInt("rewardNomes") + "Н";
+                    g.drawString(this.font, stars + suffix, nx + 4, ny + nh - 14, 0xFF6E260E, false);
                     if (isAccepted) {
                         g.drawString(this.font, "✔ ВЗЯТО", nx + nw - 44, ny + 3, 0xFF117711, false);
                     }
@@ -972,7 +1134,6 @@ public class AmarthaloeMenuScreen extends Screen {
         int sw = 306;
         int sh = ySize - 74;
 
-        // Большой развернутый пергаментный свиток
         g.fill(sx + 4, sy + 4, sx + sw + 4, sy + sh + 4, 0x99000000);
         g.fill(sx, sy, sx + sw, sy + sh, 0xFF221C15);
         g.renderOutline(sx, sy, sw, sh, 0xFFD4AF37);
@@ -1019,6 +1180,13 @@ public class AmarthaloeMenuScreen extends Screen {
 
             g.drawString(this.font, "§6Условие контракта: §f" + n.getString("targetDisplay") + " §e(" + Math.min(req, currentProg) + "/" + req + ")", sx + 15, sy + 112, 0xFFFFFFFF);
             g.drawString(this.font, "§6Вознаграждение: §a+" + n.getInt("rewardNomes") + " Номов §7и §b+" + n.getInt("rewardRep") + " Репутации", sx + 15, sy + 126, 0xFFFFFFFF);
+
+            String rewardBookId = n.getString("rewardBookId");
+            if (!rewardBookId.isEmpty()) {
+                LoreBookRegistry.LoreBook rewardBook = LoreBookRegistry.byId(rewardBookId);
+                String bookTitle = rewardBook != null ? rewardBook.spineTitle() : rewardBookId;
+                g.drawString(this.font, "§d📖 Особая награда на полку: §fТом «" + bookTitle + "»", sx + 15, sy + 140, 0xFFFFFFFF);
+            }
         }
     }
 
@@ -1139,6 +1307,43 @@ public class AmarthaloeMenuScreen extends Screen {
             return true;
         }
 
+        // Клик по книге на Книжной Полке (вкладка ИНФОРМАЦИЯ)
+        if ("ИНФОРМАЦИЯ".equals(currentTab) && openedBookId == null && Minecraft.getInstance().player != null) {
+            PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
+            int winX = leftPos + 110;
+            int winY = topPos + 8;
+            int shelfX = winX + 12;
+            int[] rowY = {winY + 34, winY + 136};
+            int shelfH = 84;
+
+            for (int row = 0; row < 2; row++) {
+                int sy = rowY[row];
+                for (int col = 0; col < 7; col++) {
+                    int idx = row * 7 + col;
+                    if (idx >= LoreBookRegistry.BOOKS.size()) break;
+
+                    int bx = shelfX + 7 + col * 44;
+                    int by = sy + 6;
+                    int bw = 40;
+                    int bh = shelfH - 7;
+
+                    if (mouseX >= bx && mouseX <= bx + bw && mouseY >= by && mouseY <= by + bh) {
+                        LoreBookRegistry.LoreBook book = LoreBookRegistry.BOOKS.get(idx);
+                        boolean isUnlocked = !book.secretByDefault() || data.unlockedBooks.contains(book.id());
+                        if (isUnlocked) {
+                            this.openedBookId = book.id();
+                            this.bookPage = 0;
+                            Minecraft.getInstance().player.playSound(SoundEvents.BOOK_PAGE_TURN, 1.0f, 1.0f);
+                            this.rebuildWidgets();
+                        } else {
+                            Minecraft.getInstance().player.playSound(SoundEvents.CHEST_LOCKED, 0.7f, 1.2f);
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+
         // Клик по свитками или перетаскивание Доски Объявлений
         if ("ОБЪЯВЛЕНИЯ".equals(currentTab) && !writingLeafletMode && expandedNoticeId == null) {
             int winX = leftPos + 110;
@@ -1227,6 +1432,17 @@ public class AmarthaloeMenuScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        if ("ИНФОРМАЦИЯ".equals(currentTab) && openedBookId != null) {
+            int newPage = Math.clamp(bookPage - (int) Math.signum(scrollY), 0, totalBookPages - 1);
+            if (newPage != bookPage) {
+                bookPage = newPage;
+                if (Minecraft.getInstance().player != null) {
+                    Minecraft.getInstance().player.playSound(SoundEvents.BOOK_PAGE_TURN, 0.7f, 1.1f);
+                }
+                this.rebuildWidgets();
+            }
+            return true;
+        }
         if ("ОБЪЯВЛЕНИЯ".equals(currentTab) && !writingLeafletMode && expandedNoticeId == null) {
             boardPanY = Math.clamp(boardPanY - (float) (scrollY * 22.0f), 0.0f, 320.0f);
             boardPanX = Math.clamp(boardPanX - (float) (scrollX * 22.0f), 0.0f, 520.0f);
@@ -1657,7 +1873,6 @@ public class AmarthaloeMenuScreen extends Screen {
         PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
 
         g.drawString(this.font, "ПАСПОРТ ПЕРСОНАЖА", winX + 12, winY + 8, 0xFFE0C068);
-        // Отображение городской валюты (Номов) прямо в шапке паспорта
         String nomesStr = "◈ Баланс: " + data.nomes + " Номов";
         int nomesW = this.font.width(nomesStr);
         g.drawString(this.font, nomesStr, winX + 328 - nomesW, winY + 8, 0xFFFFD700);
