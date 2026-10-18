@@ -4,6 +4,7 @@ import com.amarthaloe.data.OfflineMailStorage;
 import com.amarthaloe.data.PassportData;
 import com.amarthaloe.network.PassportNetworking;
 import com.amarthaloe.rpg.Faction;
+import com.amarthaloe.rpg.LoreBookRegistry;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.Commands;
@@ -35,6 +36,7 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.network.PacketDistributor;
 
@@ -97,13 +99,62 @@ public class ServerEvents {
         }
     }
 
+    // Позволяет также поместить найденный Фолиант на полку правым кликом мыши в руке
+    @SubscribeEvent
+    public static void onRightClickItem(PlayerInteractEvent.RightClickItem event) {
+        if (event.getEntity() instanceof ServerPlayer sp) {
+            ItemStack stack = event.getItemStack();
+            LoreBookRegistry book = LoreBookRegistry.fromItemStack(stack);
+            if (book != null) {
+                event.setCanceled(true);
+                PassportData data = sp.getData(PassportData.PASSPORT);
+                if (data.isBookUnlocked(book)) {
+                    sp.sendSystemMessage(Component.literal("§6[Архив Амарталоэ] §eФолиант «" + book.spineTitle + "» уже стоит на вашей книжной полке! Откройте §b[M] -> ИНФОРМАЦИЯ§e."));
+                } else {
+                    data.unlockedBooks.add(book.id);
+                    stack.shrink(1);
+                    sp.setData(PassportData.PASSPORT, data);
+                    syncPlayerDataWithOnlineStatus(sp);
+                    sp.sendSystemMessage(Component.literal("§6[Архив Амарталоэ] §aВы поместили фолиант «§e" + book.spineTitle + "§a» на свою книжную полку! Откройте §b[M] -> ИНФОРМАЦИЯ§a, чтобы прочитать его."));
+                    sp.playNotifySound(SoundEvents.BOOK_PAGE_TURN, SoundSource.MASTER, 1.0f, 1.1f);
+                    sp.playNotifySound(SoundEvents.PLAYER_LEVELUP, SoundSource.MASTER, 0.5f, 1.3f);
+                }
+            }
+        }
+    }
+
+    // Помещение найденной в инвентаре книги на полку кнопкой прямо из вкладки ИНФОРМАЦИЯ
+    public static void handleShelfInsertBook(ServerPlayer sp) {
+        PassportData data = sp.getData(PassportData.PASSPORT);
+        boolean foundAny = false;
+
+        for (int i = 0; i < sp.getInventory().getContainerSize(); i++) {
+            ItemStack st = sp.getInventory().getItem(i);
+            LoreBookRegistry book = LoreBookRegistry.fromItemStack(st);
+            if (book != null && !data.isBookUnlocked(book)) {
+                data.unlockedBooks.add(book.id);
+                st.shrink(1);
+                foundAny = true;
+                sp.sendSystemMessage(Component.literal("§6[Архив Амарталоэ] §aФолиант «§e" + book.spineTitle + "§a» установлен на книжную полку!"));
+            }
+        }
+
+        if (foundAny) {
+            sp.setData(PassportData.PASSPORT, data);
+            syncPlayerDataWithOnlineStatus(sp);
+            sp.playNotifySound(SoundEvents.BOOK_PAGE_TURN, SoundSource.MASTER, 1.0f, 1.15f);
+            sp.playNotifySound(SoundEvents.UI_TOAST_CHALLENGE_COMPLETE, SoundSource.MASTER, 0.7f, 1.25f);
+        } else {
+            sp.sendSystemMessage(Component.literal("§c[Архив] В вашем инвентаре нет новых неизученных фолиантов."));
+        }
+    }
+
     @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
         tickCounter++;
         if (tickCounter % 20 == 0) {
             OfflineMailStorage mail = OfflineMailStorage.get(event.getServer());
             for (ServerPlayer sp : event.getServer().getPlayerList().getPlayers()) {
-                // Отслеживаем пройденные блоки для квестов типа VISIT (Патруль/Разведка)
                 Vec3 now = sp.position();
                 Vec3 prev = LAST_PLAYER_POS.put(sp.getUUID(), now);
                 if (prev != null && prev.distanceToSqr(now) < 400) {
@@ -135,7 +186,6 @@ public class ServerEvents {
                 syncPartyAndGuildToPlayer(sp, true, false);
             }
         }
-        // Каждые 5 минут (6000 тиков) добавляем новый случайный свиток на доску (до 15 НПС-свитков)
         if (tickCounter % 6000 == 0) {
             OfflineMailStorage mail = OfflineMailStorage.get(event.getServer());
             long npcQuests = mail.getBoardNotices().values().stream().filter(n -> !n.isPlayerNote).count();
@@ -148,7 +198,6 @@ public class ServerEvents {
         }
     }
 
-    // Засчитываем убийство мобов для контрактов типа KILL
     @SubscribeEvent
     public static void onLivingDeath(LivingDeathEvent event) {
         if (event.getSource().getEntity() instanceof ServerPlayer killer) {
@@ -205,7 +254,6 @@ public class ServerEvents {
         }
     }
 
-    // --- ОБРАБОТЧИКИ ДОСКИ ОБЪЯВЛЕНИЙ И КОНТРАКТОВ ---
     public static void handleBoardAcceptQuest(ServerPlayer player, String questId) {
         OfflineMailStorage mail = OfflineMailStorage.get(player.server);
         OfflineMailStorage.BoardNotice q = mail.getBoardNotices().get(questId);
@@ -233,7 +281,6 @@ public class ServerEvents {
         PassportData data = player.getData(PassportData.PASSPORT);
         if (!data.activeQuests.containsKey(questId)) return;
 
-        // Проверка условий выполнения
         if ("GATHER".equals(q.questType)) {
             Item reqItem = BuiltInRegistries.ITEM.get(ResourceLocation.parse(q.targetId));
             int have = 0;
@@ -245,7 +292,6 @@ public class ServerEvents {
                 player.sendSystemMessage(Component.literal("§c[Контракт] Недостаточно предметов в инвентаре! Требуется: " + q.targetDisplay + " (" + have + "/" + q.requiredCount + ")"));
                 return;
             }
-            // Списываем предметы по контракту
             int toRemove = q.requiredCount;
             for (int i = 0; i < player.getInventory().getContainerSize() && toRemove > 0; i++) {
                 ItemStack st = player.getInventory().getItem(i);
@@ -263,10 +309,21 @@ public class ServerEvents {
             }
         }
 
-        // Заказ выполнен! Удаляем свиток с доски, генерируем новый на замену и выдаем Номы + Репутацию
         data.activeQuests.remove(questId);
         data.nomes += q.rewardNomes;
         player.setData(PassportData.PASSPORT, data);
+
+        // Если за этот контракт полагается редкий лорный фолиант — выдаем его в инвентарь!
+        if (q.rewardBookId != null && !q.rewardBookId.isEmpty()) {
+            LoreBookRegistry rewardBook = LoreBookRegistry.byId(q.rewardBookId);
+            if (rewardBook != null) {
+                ItemStack bookStack = rewardBook.createBookItemStack();
+                if (!player.getInventory().add(bookStack)) {
+                    player.drop(bookStack, false);
+                }
+                player.sendSystemMessage(Component.literal("§d★ [Редкая Награда] §eВы получили «" + rewardBook.spineTitle + "»! Откройте §b[M] -> ИНФОРМАЦИЯ§e, чтобы поставить книгу на полку!"));
+            }
+        }
 
         mail.getBoardNotices().remove(questId);
         mail.ensureNpcQuestsPopulated();
@@ -279,10 +336,8 @@ public class ServerEvents {
         player.sendSystemMessage(Component.literal("§8§m================================================"));
         player.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 1.0f, 1.1f);
 
-        // Начисляем репутацию фракции (с проверкой повышения ступени и фанфарами)
         changeRep(player.createCommandSourceStack(), player, q.factionId, q.rewardRep, true);
 
-        // Обновляем доску для всех игроков онлайн
         for (ServerPlayer sp : player.server.getPlayerList().getPlayers()) {
             syncPartyAndGuildToPlayer(sp, false, true);
         }
@@ -431,7 +486,6 @@ public class ServerEvents {
                 guildTag.put("members", mList);
             }
 
-            // Вкладываем все свитки и листовки с Доски Объявлений
             ListTag noticesList = new ListTag();
             for (OfflineMailStorage.BoardNotice n : mail.getBoardNotices().values()) {
                 noticesList.add(n.toTag());
@@ -983,6 +1037,48 @@ public class ServerEvents {
 
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
+        // Команда выдачи и тестирования редких лорных книг: /lorebook give <legion_of_light | soul_magic | all> или /lorebook reset
+        event.getDispatcher().register(
+            Commands.literal("lorebook")
+                .then(Commands.literal("give")
+                    .then(Commands.argument("bookId", StringArgumentType.word())
+                        .suggests((ctx, builder) -> SharedSuggestionProvider.suggest(List.of("legion_of_light", "soul_magic", "all"), builder))
+                        .executes(ctx -> {
+                            ServerPlayer sp = ctx.getSource().getPlayerOrException();
+                            String arg = StringArgumentType.getString(ctx, "bookId");
+                            if ("all".equalsIgnoreCase(arg)) {
+                                sp.getInventory().add(LoreBookRegistry.BOOK_LEGION_OF_LIGHT.createBookItemStack());
+                                sp.getInventory().add(LoreBookRegistry.BOOK_SOUL_MAGIC.createBookItemStack());
+                                sp.sendSystemMessage(Component.literal("§6[Архив] §aВы получили оба закрытых фолианта: «Легион Света» и «Природа Души»! Откройте §b[M] -> ИНФОРМАЦИЯ§a, чтобы поставить их на полку."));
+                                return 1;
+                            }
+                            LoreBookRegistry book = LoreBookRegistry.byId(arg);
+                            if (book == null) {
+                                sp.sendSystemMessage(Component.literal("§cНеизвестная книга! Используйте: legion_of_light, soul_magic или all"));
+                                return 0;
+                            }
+                            sp.getInventory().add(book.createBookItemStack());
+                            sp.sendSystemMessage(Component.literal("§6[Архив] §aВы получили фолиант «§e" + book.spineTitle + "§a»! Откройте §b[M] -> ИНФОРМАЦИЯ§a, чтобы поместить его на полку."));
+                            return 1;
+                        })
+                    )
+                )
+                .then(Commands.literal("reset")
+                    .executes(ctx -> {
+                        ServerPlayer sp = ctx.getSource().getPlayerOrException();
+                        PassportData data = sp.getData(PassportData.PASSPORT);
+                        data.unlockedBooks.clear();
+                        for (LoreBookRegistry b : LoreBookRegistry.values()) {
+                            if (b.defaultUnlocked) data.unlockedBooks.add(b.id);
+                        }
+                        sp.setData(PassportData.PASSPORT, data);
+                        syncPlayerDataWithOnlineStatus(sp);
+                        sp.sendSystemMessage(Component.literal("§6[Архив] §eКнижная полка сброшена: книги «Легион Света» и «Природа Души» снова закрыты."));
+                        return 1;
+                    })
+                )
+        );
+
         event.getDispatcher().register(
             Commands.literal("passport")
                 .then(Commands.literal("reset")
@@ -1017,7 +1113,6 @@ public class ServerEvents {
                 )
         );
 
-        // Команда управления городской валютой (Номами): /nomes add|set <игрок> <сумма>
         event.getDispatcher().register(
             Commands.literal("nomes")
                 .requires(source -> source.hasPermission(2))
