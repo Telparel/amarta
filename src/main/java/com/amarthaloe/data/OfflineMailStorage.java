@@ -152,6 +152,7 @@ public class OfflineMailStorage extends SavedData {
         public int difficulty = 1;
         public int rewardRep = 10;
         public int rewardNomes = 25;
+        public String rewardBookId = ""; // Особая награда — лорная книга для книжной полки!
         public int boardX = 40;
         public int boardY = 40;
 
@@ -171,6 +172,7 @@ public class OfflineMailStorage extends SavedData {
             t.putInt("difficulty", difficulty);
             t.putInt("rewardRep", rewardRep);
             t.putInt("rewardNomes", rewardNomes);
+            t.putString("rewardBookId", rewardBookId);
             t.putInt("boardX", boardX);
             t.putInt("boardY", boardY);
             return t;
@@ -192,6 +194,7 @@ public class OfflineMailStorage extends SavedData {
             b.difficulty = t.getInt("difficulty");
             b.rewardRep = t.getInt("rewardRep");
             b.rewardNomes = t.getInt("rewardNomes");
+            b.rewardBookId = t.getString("rewardBookId");
             b.boardX = t.getInt("boardX");
             b.boardY = t.getInt("boardY");
             return b;
@@ -213,65 +216,66 @@ public class OfflineMailStorage extends SavedData {
         }
     );
 
-    private record QuestTemplate(Faction faction, String title, String desc, String type, String targetId, String targetDisplay, int count, int diff, int rep, int nomes) {}
+    private record QuestTemplate(Faction faction, String title, String desc, String type, String targetId, String targetDisplay, int count, int diff, int rep, int nomes, String rewardBookId) {}
 
-    // УСЛОЖНЕННЫЙ ПУЛ КОНТРАКТОВ ИСОНОМИИ (1..3 ЗВЕЗДЫ)
     private static final List<QuestTemplate> QUEST_POOL = List.of(
         // --- НИЖНИЙ ГОРОД ---
         new QuestTemplate(Faction.LOWER_CITY, "Тотальная зачистка коллекторов",
             "В коллекторах под жилым массивом прорвало старую дамбу, и оттуда хлынули орды мертвецов. Перебей не менее тридцати тварей, иначе подвалы не отстоять.",
-            "KILL", "minecraft:zombie", "Убить Зомби", 30, 1, 15, 45),
+            "KILL", "minecraft:zombie", "Убить Зомби", 30, 1, 15, 45, ""),
         new QuestTemplate(Faction.LOWER_CITY, "Оптовая поставка для трущоб",
             "Голод в нижних ярусах усиливается. Нам нужна крупная партия органики и плоти для переработки на технический жир и приманки.",
-            "GATHER", "minecraft:rotten_flesh", "Сдать Гнилую плоть", 64, 1, 15, 40),
+            "GATHER", "minecraft:rotten_flesh", "Сдать Гнилую плоть", 64, 1, 15, 40, ""),
         new QuestTemplate(Faction.LOWER_CITY, "Дальний рейд контрабандистов",
             "Нужно протоптать безопасный обходной маршрут вокруг блокпостов Наместников. Предстоит долгий пеший переход по пустошам.",
-            "VISIT", "patrol_blocks", "Пройти блоков по миру", 2500, 2, 25, 70),
+            "VISIT", "patrol_blocks", "Пройти блоков по миру", 2500, 2, 25, 70, ""),
         new QuestTemplate(Faction.LOWER_CITY, "Охота на болотных ведьм",
             "В заброшенных хрущёвках на окраине обосновались ведьмы — травят колодцы и пугают старьёвщиков. Ликвидируй их всех до единой.",
-            "KILL", "minecraft:witch", "Убить Ведьм", 10, 3, 45, 130),
+            "KILL", "minecraft:witch", "Убить Ведьм", 10, 3, 45, 130, ""),
 
         // --- СРЕДНИЙ КЛАСС ---
         new QuestTemplate(Faction.MIDDLE_CLASS, "Двойная норма угля для ТЭЦ",
             "ТЭЦ-2 работает на пределе износа! Чтобы не заморозить спальные районы Исономии, требуется сдать два полных стака каменного угля.",
-            "GATHER", "minecraft:coal", "Сдать Уголь", 128, 1, 15, 50),
+            "GATHER", "minecraft:coal", "Сдать Уголь", 128, 1, 15, 50, ""),
         new QuestTemplate(Faction.MIDDLE_CLASS, "Тяжелый металл для Пятилетки",
             "Литейный цех остановил конвейер из-за нехватки сырья. Требуется крупная партия железных слитков для выполнения квартального плана.",
-            "GATHER", "minecraft:iron_ingot", "Сдать Железные слитки", 64, 2, 30, 85),
+            "GATHER", "minecraft:iron_ingot", "Сдать Железные слитки", 64, 2, 30, 85, ""),
         new QuestTemplate(Faction.MIDDLE_CLASS, "Дезинсекция вентиляционных шахт",
             "Шахты метрополитена и старых заводов кишат гигантскими пауками. Рабочие отказываются выходить в ночную смену. Зачистите гнезда!",
-            "KILL", "minecraft:spider", "Убить Пауков", 35, 2, 25, 75),
+            "KILL", "minecraft:spider", "Убить Пауков", 35, 2, 25, 75, ""),
         new QuestTemplate(Faction.MIDDLE_CLASS, "Алмазные резцы для буровых",
             "Для проходческих щитов метростроя Исономии срочно требуются сверхпрочные алмазы. Контракт высокой сложности, оплата по высшему разряду.",
-            "GATHER", "minecraft:diamond", "Сдать Алмазы", 16, 3, 50, 150),
+            "GATHER", "minecraft:diamond", "Сдать Алмазы", 16, 3, 50, 150, ""),
 
         // --- ИНТЕЛЛИГЕНЦИЯ ---
         new QuestTemplate(Faction.INTELLIGENTSIA, "Массовый сбор костных образцов",
             "Отдел радиологии НИИ-7 проводит масштабное исследование мутаций. Требуется уничтожить крупную популяцию скелетов в окрестностях.",
-            "KILL", "minecraft:skeleton", "Убить Скелетов", 40, 2, 30, 80),
+            "KILL", "minecraft:skeleton", "Убить Скелетов", 40, 2, 30, 80, ""),
         new QuestTemplate(Faction.INTELLIGENTSIA, "Партия меди для главного Архива",
             "Для модернизации телеграфной и вычислительной сети Исономии необходима полная партия очищенных медных слитков.",
-            "GATHER", "minecraft:copper_ingot", "Сдать Медные слитки", 64, 1, 15, 50),
+            "GATHER", "minecraft:copper_ingot", "Сдать Медные слитки", 64, 1, 15, 50, ""),
         new QuestTemplate(Faction.INTELLIGENTSIA, "Золотые контакты для ЭВМ «Весы»",
             "Высокоточные реле центральной ЭВМ требуют некорродирующего металла. Принесите 32 золотых слитка в лабораторию Госплана.",
-            "GATHER", "minecraft:gold_ingot", "Сдать Золотые слитки", 32, 2, 30, 90),
-        new QuestTemplate(Faction.INTELLIGENTSIA, "Изучение пространственных аномалий",
-            "В районе разрушенных НИИ замечены странники Края (Эндермены), искажающие метрику пространства. Устраните 20 особей для стабилизации фона.",
-            "KILL", "minecraft:enderman", "Убить Эндерменов", 20, 3, 50, 140),
+            "GATHER", "minecraft:gold_ingot", "Сдать Золотые слитки", 32, 2, 30, 90, ""),
+        // ОСОБЫЙ КВЕСТ НА КНИГУ «ПРИРОДА ДУШИ»
+        new QuestTemplate(Faction.INTELLIGENTSIA, "Запретная рукопись: Природа Души",
+            "В районе разрушенных НИИ замечены странники Края, искажающие метрику пространства. Устраните 20 особей — и Архив передаст вам секретную диссертацию о структуре Души и Призмах.",
+            "KILL", "minecraft:enderman", "Убить Эндерменов", 20, 3, 50, 140, "soul_magic"),
 
         // --- ПРАВИТЕЛЬСТВО (НАМЕСТНИКИ ЛИБРЫ) ---
         new QuestTemplate(Faction.GOVERNMENT, "Особый Протокол: Подрывники",
             "Диверсионная угроза! Скопления Криперов подрывают опоры ЛЭП и муниципальные стены. Барон Либра требует уничтожить 30 особей.",
-            "KILL", "minecraft:creeper", "Убить Криперов", 30, 3, 50, 145),
+            "KILL", "minecraft:creeper", "Убить Криперов", 30, 3, 50, 145, ""),
         new QuestTemplate(Faction.GOVERNMENT, "Государственный зерновой резерв",
             "Во исполнение Декрета о Равенстве Пайков каждый подрядчик обязан сдать крупную партию свежего хлеба в распределитель Наместников.",
-            "GATHER", "minecraft:bread", "Сдать Хлеб", 64, 2, 25, 80),
-        new QuestTemplate(Faction.GOVERNMENT, "Валютная ревизия Контрактов",
-            "Канцелярия Барона Контрактов изымает из теневого оборота драгоценные камни. Сдайте партию изумрудов в казну Юрисдикции.",
-            "GATHER", "minecraft:emerald", "Сдать Изумруды", 48, 3, 55, 160),
+            "GATHER", "minecraft:bread", "Сдать Хлеб", 64, 2, 25, 80, ""),
+        // ОСОБЫЙ КВЕСТ НА КНИГУ «ЛЕГИОН СВЕТА»
+        new QuestTemplate(Faction.GOVERNMENT, "Архив Либры: Кодекс Легиона Света",
+            "Канцелярия Барона Контрактов собирает драгоценные изумруды для оплаты древних архивов. Сдайте партию в казну, чтобы получить доступ к закрытому фолианту «Легион Света»!",
+            "GATHER", "minecraft:emerald", "Сдать Изумруды", 48, 3, 55, 160, "legion_of_light"),
         new QuestTemplate(Faction.GOVERNMENT, "Большой инспекционный марш-бросок",
             "Проведите полный пеший дозор дальних рубежей Исономии. Только безупречная выносливость докажет вашу верность Закону Равенства.",
-            "VISIT", "patrol_blocks", "Пройти блоков в патруле", 5000, 3, 60, 170)
+            "VISIT", "patrol_blocks", "Пройти блоков в патруле", 5000, 3, 60, 170, "")
     );
 
     private final Map<String, List<String>> chatHistories = new HashMap<>();
@@ -286,7 +290,6 @@ public class OfflineMailStorage extends SavedData {
     }
 
     public void ensureNpcQuestsPopulated() {
-        // Удаляем старые слишком легкие квесты (где требовалось меньше 10 единиц, кроме редких 3-звездочных)
         boardNotices.values().removeIf(n -> !n.isPlayerNote && n.requiredCount < 10);
 
         long npcCount = boardNotices.values().stream().filter(n -> !n.isPlayerNote).count();
@@ -316,6 +319,7 @@ public class OfflineMailStorage extends SavedData {
         n.difficulty = tpl.diff();
         n.rewardRep = tpl.rep();
         n.rewardNomes = tpl.nomes();
+        n.rewardBookId = tpl.rewardBookId();
 
         findFreeBoardPosition(n, rand);
         boardNotices.put(n.id, n);
