@@ -9,11 +9,14 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.FormattedCharSequence;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.neoforged.neoforge.network.PacketDistributor;
 
@@ -49,19 +52,27 @@ public class AmarthaloeMenuScreen extends Screen {
     private String pendingGroupAvatarId = "";
     private int friendsPage = 0;
 
-    // Группы (Party) и Содружества (Guilds)
+    // Группы и Содружества
     private EditBox partyInviteBox;
     private EditBox guildNameBox, guildTagBox, guildInviteBox;
     private String pendingGuildAvatarId = "";
     private int guildMembersOffset = 0;
 
-    // Прокрутка мессенджера и списка контактов
+    // Доска объявлений (Ведьмак 3 стиль: панорамирование 2D-холста 850x550)
+    private float boardPanX = 0.0f;
+    private float boardPanY = 0.0f;
+    private boolean isDraggingBoard = false;
+    private String expandedNoticeId = null;     // Развернутый свиток контракта или листовки
+    private boolean writingLeafletMode = false; // Режим публикации своей листовки
+    private EditBox leafletTitleBox, leafletBodyBox;
+
+    // Прокрутка мессенджера
     private float chatScrollOffset = 0.0f;
     private int maxChatScroll = 0;
     private boolean isDraggingChatScrollbar = false;
     private int contactListOffset = 0;
 
-    // Полноэкранный просмотр фотографии по клику (Лайтбокс)
+    // Полноэкранный просмотр фотографии
     private String zoomedImageId = null;
     private record ClickableImageArea(int x, int y, int w, int h, String imageId) {}
     private final List<ClickableImageArea> clickableImages = new ArrayList<>();
@@ -79,15 +90,16 @@ public class AmarthaloeMenuScreen extends Screen {
 
         menuButtons.clear();
 
+        // 10 аккуратных вкладок в левой колонке (высота 19, шаг 22 — идеально входят в высоту 275)
         String[] tabs = {
-            "ИГРОК", "ТИТУЛЫ", "РЕПУТАЦИЯ", "ДРУЗЬЯ",
-            "ГРУППЫ", "СОДРУЖЕСТВА", "СООБЩЕНИЯ", "НАСТРОЙКИ"
+            "ИГРОК", "ТИТУЛЫ", "РЕПУТАЦИЯ", "ДРУЗЬЯ", "ГРУППЫ",
+            "СОДРУЖЕСТВА", "СООБЩЕНИЯ", "ОБЪЯВЛЕНИЯ", "ИНФОРМАЦИЯ", "НАСТРОЙКИ"
         };
 
         int btnWidth = 95;
-        int btnHeight = 20;
+        int btnHeight = 19;
         int startX = leftPos + 8;
-        int startY = topPos + 14;
+        int startY = topPos + 12;
 
         int totalUnread = PassportNetworking.getTotalClientUnread();
 
@@ -95,13 +107,15 @@ public class AmarthaloeMenuScreen extends Screen {
             String tabName = tabs[i];
             String displayTab = tabName;
             if (tabName.equals("СООБЩЕНИЯ") && totalUnread > 0) {
-                displayTab = "СООБЩЕНИЯ §c[+" + totalUnread + "]";
+                displayTab = "СООБЩ. §c[+" + totalUnread + "]";
             }
 
             DarkButton btn = new DarkButton(startX, startY + (i * (btnHeight + 4)), btnWidth, btnHeight, Component.literal(displayTab), (button) -> {
                 this.currentTab = tabName;
                 this.viewingFriendPassportUuid = null;
                 this.creatingGroupMode = false;
+                this.expandedNoticeId = null;
+                this.writingLeafletMode = false;
                 this.zoomedImageId = null;
                 this.rebuildWidgets();
             });
@@ -118,8 +132,128 @@ public class AmarthaloeMenuScreen extends Screen {
             case "ГРУППЫ" -> initPartyTab();
             case "СОДРУЖЕСТВА" -> initGuildsTab();
             case "СООБЩЕНИЯ" -> initMessagesTab();
+            case "ОБЪЯВЛЕНИЯ" -> initBoardTab();
             case "НАСТРОЙКИ" -> initSettingsTab();
         }
+    }
+
+    private void initBoardTab() {
+        if (Minecraft.getInstance().player == null) return;
+        int winX = leftPos + 110;
+        int winY = topPos + 8;
+        PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
+
+        // 1. Если открыто написание собственной листовки игрока
+        if (writingLeafletMode) {
+            leafletTitleBox = createField(winX + 20, winY + 55, 290, 18, "", 36, "Заголовок листовки (например: Куплю уголь / Набор в клан)...");
+            leafletBodyBox = createField(winX + 20, winY + 92, 290, 18, "", 160, "Текст объявления для жителей Исономии...");
+
+            DarkButton publishBtn = new DarkButton(winX + 20, winY + 125, 160, 20, Component.literal("📌 Приколоть на доску"), (b) -> {
+                String t = leafletTitleBox.getValue().trim();
+                String c = leafletBodyBox.getValue().trim();
+                if (!t.isEmpty() && !c.isEmpty()) {
+                    PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("BOARD_POST_NOTE", t, c));
+                    writingLeafletMode = false;
+                    this.rebuildWidgets();
+                }
+            });
+            DarkButton cancelBtn = new DarkButton(winX + 190, winY + 125, 120, 20, Component.literal("Отмена"), (b) -> {
+                writingLeafletMode = false;
+                this.rebuildWidgets();
+            });
+            this.addRenderableWidget(publishBtn);
+            this.addRenderableWidget(cancelBtn);
+            return;
+        }
+
+        // 2. Если игрок кликнул на свиток и развернул его во весь экран
+        if (expandedNoticeId != null) {
+            CompoundTag notice = findNoticeById(expandedNoticeId);
+            if (notice == null) {
+                expandedNoticeId = null;
+            } else {
+                boolean isPlayerNote = notice.getBoolean("isPlayerNote");
+                String myUuid = Minecraft.getInstance().player.getStringUUID();
+
+                DarkButton closeScrollBtn = new DarkButton(winX + 22, winY + ySize - 42, 110, 20, Component.literal("◄ Свернуть свиток"), (b) -> {
+                    expandedNoticeId = null;
+                    this.rebuildWidgets();
+                });
+                this.addRenderableWidget(closeScrollBtn);
+
+                if (isPlayerNote) {
+                    if (myUuid.equals(notice.getString("authorUuid")) || Minecraft.getInstance().player.hasPermissions(2)) {
+                        DarkButton delNoteBtn = new DarkButton(winX + 195, winY + ySize - 42, 125, 20, Component.literal("✖ Снять листовку"), (b) -> {
+                            PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("BOARD_REMOVE_NOTE", expandedNoticeId, ""));
+                            expandedNoticeId = null;
+                            this.rebuildWidgets();
+                        });
+                        this.addRenderableWidget(delNoteBtn);
+                    }
+                } else {
+                    boolean isAccepted = data.activeQuests.containsKey(expandedNoticeId);
+                    boolean canComplete = isQuestReadyToComplete(notice, data);
+
+                    if (!isAccepted) {
+                        DarkButton takeQuestBtn = new DarkButton(winX + 145, winY + ySize - 42, 175, 20, Component.literal("📜 Принять заказ Либры"), (b) -> {
+                            PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("BOARD_ACCEPT_QUEST", expandedNoticeId, ""));
+                            data.activeQuests.put(expandedNoticeId, 0);
+                            this.rebuildWidgets();
+                        });
+                        this.addRenderableWidget(takeQuestBtn);
+                    } else {
+                        DarkButton completeBtn = new DarkButton(winX + 145, winY + ySize - 42, 175, 20,
+                                Component.literal(canComplete ? "§a✔ СДАТЬ ЗАКАЗ (НАГРАДА)" : "В процессе выполнения..."), (b) -> {
+                            PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("BOARD_COMPLETE_QUEST", expandedNoticeId, ""));
+                            expandedNoticeId = null;
+                            this.rebuildWidgets();
+                        });
+                        completeBtn.active = canComplete;
+                        this.addRenderableWidget(completeBtn);
+                    }
+                }
+                return;
+            }
+        }
+
+        // 3. Верхняя кнопка публикации своей листовки и центрирования доски
+        DarkButton writeBtn = new DarkButton(winX + 208, winY + 7, 124, 16, Component.literal("+ Написать листовку"), (b) -> {
+            writingLeafletMode = true;
+            this.rebuildWidgets();
+        });
+        this.addRenderableWidget(writeBtn);
+    }
+
+    private CompoundTag findNoticeById(String id) {
+        if (!PassportNetworking.CLIENT_BOARD_DATA.contains("boardNotices")) return null;
+        ListTag list = PassportNetworking.CLIENT_BOARD_DATA.getList("boardNotices", Tag.TAG_COMPOUND);
+        for (int i = 0; i < list.size(); i++) {
+            CompoundTag t = list.getCompound(i);
+            if (id.equals(t.getString("id"))) return t;
+        }
+        return null;
+    }
+
+    private boolean isQuestReadyToComplete(CompoundTag q, PassportData data) {
+        String id = q.getString("id");
+        if (!data.activeQuests.containsKey(id)) return false;
+        int req = q.getInt("requiredCount");
+        if ("GATHER".equals(q.getString("questType"))) {
+            return countPlayerItem(q.getString("targetId")) >= req;
+        }
+        return data.activeQuests.getOrDefault(id, 0) >= req;
+    }
+
+    private int countPlayerItem(String itemId) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null) return 0;
+        Item item = BuiltInRegistries.ITEM.get(ResourceLocation.parse(itemId));
+        int count = 0;
+        for (int i = 0; i < mc.player.getInventory().getContainerSize(); i++) {
+            ItemStack st = mc.player.getInventory().getItem(i);
+            if (!st.isEmpty() && st.is(item)) count += st.getCount();
+        }
+        return count;
     }
 
     private void initPartyTab() {
@@ -129,7 +263,6 @@ public class AmarthaloeMenuScreen extends Screen {
         String myUuid = Minecraft.getInstance().player.getStringUUID();
         CompoundTag party = PassportNetworking.CLIENT_PARTY_DATA;
 
-        // Поле приглашения игрока в группу
         partyInviteBox = createField(winX + 12, winY + 24, 200, 18, "", 40, "Ник или РП-имя игрока...");
         DarkButton invBtn = new DarkButton(winX + 218, winY + 24, 112, 18, Component.literal("+ Пригласить (до 5)"), (b) -> {
             String val = partyInviteBox.getValue().trim();
@@ -140,7 +273,6 @@ public class AmarthaloeMenuScreen extends Screen {
         });
         this.addRenderableWidget(invBtn);
 
-        // Если есть входящее приглашение в группу
         if (party.contains("pendingInviteFrom")) {
             String leaderUuid = party.getString("pendingInviteFrom");
             DarkButton acceptBtn = new DarkButton(winX + 195, winY + 50, 64, 18, Component.literal("Принять"), (b) -> {
@@ -161,7 +293,6 @@ public class AmarthaloeMenuScreen extends Screen {
             boolean isLeader = myUuid.equals(party.getString("leaderUuid"));
             boolean ff = party.getBoolean("friendlyFire");
 
-            // Переключатель дружественного огня и кнопка Выхода
             DarkButton ffBtn = new DarkButton(winX + 12, winY + 50, 195, 18,
                     Component.literal("Огонь по своим: " + (ff ? "§cВКЛЮЧЕН" : "§aВЫКЛЮЧЕН")), (b) -> {
                 PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("PARTY_TOGGLE_FF", "", ""));
@@ -196,7 +327,6 @@ public class AmarthaloeMenuScreen extends Screen {
         String myUuid = Minecraft.getInstance().player.getStringUUID();
         CompoundTag guild = PassportNetworking.CLIENT_GUILD_DATA;
 
-        // Если игрок ЕЩЕ НЕ СОСТОИТ в содружестве
         if (!guild.contains("guildId")) {
             if (guild.contains("pendingGuildId")) {
                 String gId = guild.getString("pendingGuildId");
@@ -237,14 +367,12 @@ public class AmarthaloeMenuScreen extends Screen {
             return;
         }
 
-        // Игрок СОСТОИТ в содружестве
         String myRank = guild.getString("myRank");
         boolean isLeader = "LEADER".equals(myRank);
         boolean isOfficer = isLeader || "OFFICER".equals(myRank);
         boolean ff = guild.getBoolean("friendlyFire");
         boolean canChest = guild.getBoolean("canOpenChest");
 
-        // Верхний ряд управления содружеством
         DarkButton ffBtn = new DarkButton(winX + 54, winY + 34, 130, 18,
                 Component.literal("ПвП клана: " + (ff ? "§cВКЛ" : "§aВЫКЛ")), (b) -> {
             PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("GUILD_TOGGLE_FF", "", ""));
@@ -263,7 +391,6 @@ public class AmarthaloeMenuScreen extends Screen {
         });
         this.addRenderableWidget(leaveBtn);
 
-        // Поле приглашения новых участников
         if (isOfficer) {
             guildInviteBox = createField(winX + 12, winY + 58, 210, 16, "", 36, "Пригласить по нику или РП-имени...");
             DarkButton invBtn = new DarkButton(winX + 226, winY + 58, 106, 16, Component.literal("+ Пригласить"), (b) -> {
@@ -276,7 +403,6 @@ public class AmarthaloeMenuScreen extends Screen {
             this.addRenderableWidget(invBtn);
         }
 
-        // Список участников с кнопками выдачи рангов (▲/▼), доступа к сундуку и исключения
         ListTag members = guild.getList("members", Tag.TAG_COMPOUND);
         int startY = winY + 90;
         int maxRows = 5;
@@ -693,7 +819,12 @@ public class AmarthaloeMenuScreen extends Screen {
             case "ГРУППЫ" -> renderPartyContent(guiGraphics, mainWinX, mainWinY);
             case "СОДРУЖЕСТВА" -> renderGuildsContent(guiGraphics, mainWinX, mainWinY);
             case "СООБЩЕНИЯ" -> renderMessagesContent(guiGraphics, mainWinX, mainWinY);
+            case "ОБЪЯВЛЕНИЯ" -> renderBoardContent(guiGraphics, mainWinX, mainWinY, mouseX, mouseY);
             case "НАСТРОЙКИ" -> renderSettingsContent(guiGraphics, mainWinX, mainWinY);
+            default -> {
+                guiGraphics.drawString(this.font, "РАЗДЕЛ: " + currentTab, mainWinX + 15, mainWinY + 15, 0xFFE0C068);
+                guiGraphics.drawString(this.font, "Модуль в разработке...", mainWinX + 15, mainWinY + 35, 0xFF777777);
+            }
         }
 
         if (zoomedImageId != null) {
@@ -717,6 +848,177 @@ public class AmarthaloeMenuScreen extends Screen {
             }
             guiGraphics.drawCenteredString(this.font, "§eНажмите в любое место экрана, чтобы закрыть фото", this.width / 2, this.height - 22, 0xFFFFFFFF);
             guiGraphics.pose().popPose();
+        }
+    }
+
+    // --- ОТРИСОВКА ДОСКИ ОБЪЯВЛЕНИЙ В СТИЛЕ ВЕДЬМАКА 3 ---
+    private void renderBoardContent(GuiGraphics g, int winX, int winY, int mouseX, int mouseY) {
+        if (Minecraft.getInstance().player == null) return;
+        PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
+
+        g.drawString(this.font, "ДОСКА ЗАКАЗОВ ИСОНОМИИ", winX + 10, winY + 9, 0xFFE0C068);
+        g.drawString(this.font, "§6◈ " + data.nomes + " Номов", winX + 145, winY + 9, 0xFFFFD700);
+
+        if (writingLeafletMode) {
+            g.drawString(this.font, "ПУБЛИКАЦИЯ ГОРОДСКОЙ ЛИСТОВКИ", winX + 20, winY + 32, 0xFFE0C068);
+            g.drawString(this.font, "Заголовок:", winX + 20, winY + 44, 0xFFAAAAAA);
+            g.drawString(this.font, "Содержание листовки:", winX + 20, winY + 80, 0xFFAAAAAA);
+            return;
+        }
+
+        // Если развернут конкретный свиток заказа или листовки
+        if (expandedNoticeId != null) {
+            CompoundTag notice = findNoticeById(expandedNoticeId);
+            if (notice != null) {
+                renderExpandedScroll(g, winX, winY, notice, data);
+                return;
+            }
+        }
+
+        // Область интерактивной деревянной доски (можно тянуть мышкой!)
+        int viewX = winX + 8;
+        int viewY = winY + 26;
+        int viewW = 326;
+        int viewH = ySize - 48;
+
+        // Фон темного дерева доски
+        g.fill(viewX, viewY, viewX + viewW, viewY + viewH, 0xFF1B140E);
+
+        g.enableScissor(viewX + 1, viewY + 1, viewX + viewW - 1, viewY + viewH - 1);
+
+        // Рисуем текстурные доски/плиты на фоне, которые сдвигаются вместе с панорамированием (boardPanX, boardPanY)
+        int canvasW = 850;
+        int canvasH = 550;
+        int originX = viewX - (int) boardPanX;
+        int originY = viewY - (int) boardPanY;
+
+        for (int gx = 0; gx < canvasW; gx += 120) {
+            g.fill(originX + gx, originY, originX + gx + 1, originY + canvasH, 0x22000000);
+        }
+        for (int gy = 0; gy < canvasH; gy += 90) {
+            g.fill(originX, originY + gy, originX + canvasW, originY + gy + 1, 0x22000000);
+        }
+
+        // Рисуем все приколотые свитки контрактов и листовки игроков
+        if (PassportNetworking.CLIENT_BOARD_DATA.contains("boardNotices")) {
+            ListTag notices = PassportNetworking.CLIENT_BOARD_DATA.getList("boardNotices", Tag.TAG_COMPOUND);
+            for (int i = 0; i < notices.size(); i++) {
+                CompoundTag n = notices.getCompound(i);
+                int nx = originX + n.getInt("boardX");
+                int ny = originY + n.getInt("boardY");
+                int nw = 96;
+                int nh = 64;
+
+                if (nx + nw < viewX || nx > viewX + viewW || ny + nh < viewY || ny > viewY + viewH) continue;
+
+                boolean isPlayerNote = n.getBoolean("isPlayerNote");
+                String id = n.getString("id");
+                boolean isAccepted = data.activeQuests.containsKey(id);
+                boolean hovered = mouseX >= nx && mouseX <= nx + nw && mouseY >= ny && mouseY <= ny + nh
+                        && mouseX >= viewX && mouseX <= viewX + viewW && mouseY >= viewY && mouseY <= viewY + viewH;
+
+                // Тень под свитком
+                g.fill(nx + 3, ny + 3, nx + nw + 3, ny + nh + 3, 0x88000000);
+
+                // Пергаментная бумага (чуть светлее при наведении)
+                int paperCol = isPlayerNote ? (hovered ? 0xFFE5EEF5 : 0xFFD0DCE5) : (hovered ? 0xFFF5E6C4 : 0xFFE2CFA5);
+                g.fill(nx, ny, nx + nw, ny + nh, paperCol);
+
+                // Верхняя и нижняя деревянные планки свитка
+                g.fill(nx - 2, ny, nx + nw + 2, ny + 4, 0xFF4A3219);
+                g.fill(nx - 2, ny + nh - 3, nx + nw + 2, ny + nh, 0xFF4A3219);
+
+                // Сургучная печать фракции (или синяя булавка для листовки игрока)
+                int sealColor = 0xFF2B65EC;
+                if (!isPlayerNote) {
+                    Faction f = Faction.byId(n.getString("factionId"));
+                    if (f != null) sealColor = f.color;
+                }
+                g.fill(nx + nw / 2 - 5, ny + 2, nx + nw / 2 + 5, ny + 10, sealColor);
+                g.renderOutline(nx, ny, nw, nh, isAccepted ? 0xFF22AA22 : (hovered ? 0xFFFFD700 : 0xFF6B5335));
+
+                // Заголовок свитка (темными чернилами по пергаменту)
+                String title = n.getString("title");
+                List<FormattedCharSequence> lines = this.font.split(Component.literal(title), nw - 8);
+                int ty = ny + 13;
+                for (int l = 0; l < Math.min(2, lines.size()); l++) {
+                    g.drawString(this.font, lines.get(l), nx + 4, ty, 0xFF1E140A, false);
+                    ty += 9;
+                }
+
+                // Нижняя подпись на свитке: сложность/награда или имя автора
+                if (isPlayerNote) {
+                    g.drawString(this.font, "От: " + n.getString("authorName"), nx + 4, ny + nh - 14, 0xFF2B4C7E, false);
+                } else {
+                    int diff = n.getInt("difficulty");
+                    String stars = "★".repeat(Math.max(1, diff)) + "☆".repeat(Math.max(0, 3 - diff));
+                    g.drawString(this.font, stars + " +" + n.getInt("rewardNomes") + "Н", nx + 4, ny + nh - 14, 0xFF6E260E, false);
+                    if (isAccepted) {
+                        g.drawString(this.font, "✔ ВЗЯТО", nx + nw - 44, ny + 3, 0xFF117711, false);
+                    }
+                }
+            }
+        }
+
+        g.disableScissor();
+        g.renderOutline(viewX, viewY, viewW, viewH, 0xFF6B5335);
+
+        g.drawString(this.font, "§8Зажмите ЛКМ и двигайте мышь для осмотра всей доски • Клик по свитку — развернуть", winX + 10, winY + ySize - 20, 0xFF888888);
+    }
+
+    private void renderExpandedScroll(GuiGraphics g, int winX, int winY, CompoundTag n, PassportData data) {
+        int sx = winX + 18;
+        int sy = winY + 26;
+        int sw = 306;
+        int sh = ySize - 74;
+
+        // Большой развернутый пергаментный свиток
+        g.fill(sx + 4, sy + 4, sx + sw + 4, sy + sh + 4, 0x99000000);
+        g.fill(sx, sy, sx + sw, sy + sh, 0xFF221C15);
+        g.renderOutline(sx, sy, sw, sh, 0xFFD4AF37);
+
+        boolean isPlayerNote = n.getBoolean("isPlayerNote");
+        String title = n.getString("title");
+        String author = n.getString("authorName");
+        String desc = n.getString("description");
+
+        g.drawCenteredString(this.font, "§6§l" + title, sx + sw / 2, sy + 10, 0xFFFFFFFF);
+        g.fill(sx + 15, sy + 22, sx + sw - 15, sy + 23, 0xFF8F7A42);
+
+        if (isPlayerNote) {
+            g.drawString(this.font, "§7Городская листовка от гражданина: §e" + author, sx + 15, sy + 28, 0xFFFFFFFF);
+            List<FormattedCharSequence> lines = this.font.split(Component.literal(desc), sw - 30);
+            int y = sy + 46;
+            for (FormattedCharSequence line : lines) {
+                g.drawString(this.font, line, sx + 15, y, 0xFFDDDDDD);
+                y += 11;
+            }
+        } else {
+            Faction f = Faction.byId(n.getString("factionId"));
+            String facName = f != null ? f.chatColor + f.displayName : "Исономия";
+            int diff = n.getInt("difficulty");
+            String stars = "§e" + "★".repeat(Math.max(1, diff)) + "§7" + "☆".repeat(Math.max(0, 3 - diff));
+
+            g.drawString(this.font, "§7Заказчик: §f" + author, sx + 15, sy + 27, 0xFFFFFFFF);
+            g.drawString(this.font, "§7Структура: " + facName + "   §7Сложность: " + stars, sx + 15, sy + 38, 0xFFFFFFFF);
+
+            List<FormattedCharSequence> lines = this.font.split(Component.literal("«" + desc + "»"), sw - 30);
+            int y = sy + 54;
+            for (FormattedCharSequence line : lines) {
+                g.drawString(this.font, line, sx + 15, y, 0xFFCCCCCC);
+                y += 10;
+            }
+
+            g.fill(sx + 15, sy + 105, sx + sw - 15, sy + 106, 0xFF4A3B2A);
+
+            String id = n.getString("id");
+            int req = n.getInt("requiredCount");
+            int currentProg = "GATHER".equals(n.getString("questType"))
+                    ? countPlayerItem(n.getString("targetId"))
+                    : data.activeQuests.getOrDefault(id, 0);
+
+            g.drawString(this.font, "§6Условие контракта: §f" + n.getString("targetDisplay") + " §e(" + Math.min(req, currentProg) + "/" + req + ")", sx + 15, sy + 112, 0xFFFFFFFF);
+            g.drawString(this.font, "§6Вознаграждение: §a+" + n.getInt("rewardNomes") + " Номов §7и §b+" + n.getInt("rewardRep") + " Репутации", sx + 15, sy + 126, 0xFFFFFFFF);
         }
     }
 
@@ -837,6 +1139,37 @@ public class AmarthaloeMenuScreen extends Screen {
             return true;
         }
 
+        // Клик по свитками или перетаскивание Доски Объявлений
+        if ("ОБЪЯВЛЕНИЯ".equals(currentTab) && !writingLeafletMode && expandedNoticeId == null) {
+            int winX = leftPos + 110;
+            int winY = topPos + 8;
+            int viewX = winX + 8;
+            int viewY = winY + 26;
+            int viewW = 326;
+            int viewH = ySize - 48;
+
+            if (mouseX >= viewX && mouseX <= viewX + viewW && mouseY >= viewY && mouseY <= viewY + viewH) {
+                int originX = viewX - (int) boardPanX;
+                int originY = viewY - (int) boardPanY;
+
+                if (PassportNetworking.CLIENT_BOARD_DATA.contains("boardNotices")) {
+                    ListTag notices = PassportNetworking.CLIENT_BOARD_DATA.getList("boardNotices", Tag.TAG_COMPOUND);
+                    for (int i = notices.size() - 1; i >= 0; i--) {
+                        CompoundTag n = notices.getCompound(i);
+                        int nx = originX + n.getInt("boardX");
+                        int ny = originY + n.getInt("boardY");
+                        if (mouseX >= nx && mouseX <= nx + 96 && mouseY >= ny && mouseY <= ny + 64) {
+                            this.expandedNoticeId = n.getString("id");
+                            this.rebuildWidgets();
+                            return true;
+                        }
+                    }
+                }
+                isDraggingBoard = true;
+                return true;
+            }
+        }
+
         if ("СООБЩЕНИЯ".equals(currentTab) && !creatingGroupMode && activeChatFriendUuid != null && maxChatScroll > 0) {
             int winX = leftPos + 110;
             int winY = topPos + 8;
@@ -864,11 +1197,17 @@ public class AmarthaloeMenuScreen extends Screen {
     @Override
     public boolean mouseReleased(double mouseX, double mouseY, int button) {
         isDraggingChatScrollbar = false;
+        isDraggingBoard = false;
         return super.mouseReleased(mouseX, mouseY, button);
     }
 
     @Override
     public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
+        if (isDraggingBoard) {
+            boardPanX = Math.clamp(boardPanX - (float) dragX, 0.0f, 520.0f);
+            boardPanY = Math.clamp(boardPanY - (float) dragY, 0.0f, 320.0f);
+            return true;
+        }
         if (isDraggingChatScrollbar && maxChatScroll > 0) {
             int winY = topPos + 8;
             int boxY = winY + 40;
@@ -888,6 +1227,11 @@ public class AmarthaloeMenuScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        if ("ОБЪЯВЛЕНИЯ".equals(currentTab) && !writingLeafletMode && expandedNoticeId == null) {
+            boardPanY = Math.clamp(boardPanY - (float) (scrollY * 22.0f), 0.0f, 320.0f);
+            boardPanX = Math.clamp(boardPanX - (float) (scrollX * 22.0f), 0.0f, 520.0f);
+            return true;
+        }
         if ("СООБЩЕНИЯ".equals(currentTab) && !creatingGroupMode) {
             int winX = leftPos + 110;
             int winY = topPos + 8;
@@ -1313,6 +1657,10 @@ public class AmarthaloeMenuScreen extends Screen {
         PassportData data = Minecraft.getInstance().player.getData(PassportData.PASSPORT);
 
         g.drawString(this.font, "ПАСПОРТ ПЕРСОНАЖА", winX + 12, winY + 8, 0xFFE0C068);
+        // Отображение городской валюты (Номов) прямо в шапке паспорта
+        String nomesStr = "◈ Баланс: " + data.nomes + " Номов";
+        int nomesW = this.font.width(nomesStr);
+        g.drawString(this.font, nomesStr, winX + 328 - nomesW, winY + 8, 0xFFFFD700);
 
         if (!data.isLocked) {
             g.drawString(this.font, "ВНИМАНИЕ: Заполняется ОДИН РАЗ! Смена — через админов.", winX + 12, winY + 20, 0xFFFF5555);
