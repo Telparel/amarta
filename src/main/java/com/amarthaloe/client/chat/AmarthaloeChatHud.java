@@ -6,6 +6,7 @@ import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
 import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.ClientChatReceivedEvent;
@@ -23,13 +24,19 @@ public class AmarthaloeChatHud {
     public static final int BOX_WIDTH = 330;
     public static final int BOX_HEIGHT = 145;
 
-    // 1. Записываем все входящие сообщения в наш менеджер вкладок
-    @SubscribeEvent
+    // 1. Записываем все входящие сообщения в наш менеджер и блокируем их попадание в ванильный чат!
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onChatReceived(ClientChatReceivedEvent event) {
         if (event.isSystem() && event.getMessage().getString().isEmpty()) return;
+        // Не трогаем сообщения над хотбаром (Action Bar / Overlay)
+        if (event instanceof ClientChatReceivedEvent.System sys && sys.isOverlay()) return;
+
         Minecraft mc = Minecraft.getInstance();
         long ticks = mc.gui != null ? mc.gui.getGuiTicks() : 0;
         AmarthaloeChatManager.recordIncomingMessage(event.getMessage(), ticks);
+
+        // Отменяем добавление в стандартный ванильный ChatComponent, чтобы он не дублировал текст!
+        event.setCanceled(true);
     }
 
     // 2. Подменяем стандартный экран чата (по клавише T или /) на наш кастомный
@@ -41,14 +48,16 @@ public class AmarthaloeChatHud {
     }
 
     // 3. Отключаем ванильный рендер чата и рисуем золотисто-черное окно
-    @SubscribeEvent
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onRenderChatLayer(RenderGuiLayerEvent.Pre event) {
         if (!event.getName().equals(VanillaGuiLayers.CHAT)) return;
         event.setCanceled(true);
 
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.options.hideGui) return;
-        // Если сейчас открыт интерактивный чат — он сам рисует себя поверх всего в AmarthaloeChatScreen
+        // Очищаем остатки ванильного буфера на случай прямых вызовов
+        mc.gui.getChat().clearMessages(false);
+
         if (mc.screen instanceof AmarthaloeChatScreen) return;
 
         long currentTicks = mc.gui.getGuiTicks();
@@ -57,7 +66,7 @@ public class AmarthaloeChatHud {
 
         for (int i = all.size() - 1; i >= 0 && recent.size() < 12; i--) {
             AmarthaloeChatManager.ChatMessageEntry entry = all.get(i);
-            if (currentTicks - entry.timestampTicks() < 200) { // Показываем свежие сообщения 10 секунд
+            if (currentTicks - entry.timestampTicks() < 200) {
                 recent.add(0, entry);
             }
         }
@@ -71,7 +80,6 @@ public class AmarthaloeChatHud {
 
     public record RenderedLineHitbox(int y, int height, String senderTarget) {}
 
-    // Универсальный метод отрисовки нежно-рельефного золотисто-черного окна чата
     public static void renderReliefChatBox(
             GuiGraphics g, int x, int y, int w, int h,
             List<AmarthaloeChatManager.ChatMessageEntry> messages,
@@ -82,13 +90,11 @@ public class AmarthaloeChatHud {
         float scale = AmarthaloeChatManager.fontScale;
         int lineStep = (int) (9 * scale) + AmarthaloeChatManager.lineSpacing;
 
-        // 1. Внешняя мягкая тень и многослойный золотисто-черный градиентный фон
         int alphaBg = interactive ? 0xEA0B0A08 : 0xB80B0A08;
         int alphaTop = interactive ? 0xEA17130D : 0xB817130D;
         g.fill(x - 2, y - 2, x + w + 2, y + h + 2, 0x55000000);
         g.fillGradient(x, y, x + w, y + h, alphaTop, alphaBg);
 
-        // 2. Нежно-рельефная микро-текстура (тонкие диагонально-горизонтальные прожилки темного золота)
         for (int ry = y + 3; ry < y + h - 2; ry += 4) {
             g.fill(x + 2, ry, x + w - 2, ry + 1, 0x10D4AF37);
         }
@@ -96,18 +102,15 @@ public class AmarthaloeChatHud {
             g.fill(rx, y + 2, rx + 1, y + h - 2, 0x08FFFFFF);
         }
 
-        // 3. Двойная состаренная золотая рамка + угловые декоративные заклепки
         g.renderOutline(x, y, w, h, 0xFF2B2418);
         g.renderOutline(x + 1, y + 1, w - 2, h - 2, interactive ? 0xFFC5A049 : 0x998F7A42);
 
-        // Угловые золотые акценты (3x3)
         int cornerCol = interactive ? 0xFFFFD700 : 0xAA8F7A42;
         g.fill(x + 1, y + 1, x + 4, y + 4, cornerCol);
         g.fill(x + w - 4, y + 1, x + w - 1, y + 4, cornerCol);
         g.fill(x + 1, y + h - 4, x + 4, y + h - 1, cornerCol);
         g.fill(x + w - 4, y + h - 4, x + w - 1, y + h - 1, cornerCol);
 
-        // 4. Разбиваем сообщения на строки с учетом масштаба шрифта
         int wrapWidth = (int) ((w - 16) / scale);
         record WrappedLine(FormattedCharSequence seq, String senderTarget) {}
         List<WrappedLine> allLines = new ArrayList<>();
@@ -133,7 +136,6 @@ public class AmarthaloeChatHud {
         for (int i = startIdx; i < endIdx; i++) {
             WrappedLine wl = allLines.get(i);
 
-            // Подсветка строки при наведении в открытом чате, если у строки есть автор (доступен ПКМ)
             if (interactive && !wl.senderTarget.isEmpty()
                     && mouseX >= x + 3 && mouseX <= x + w - 8
                     && mouseY >= drawY - 1 && mouseY < drawY + lineStep - 1) {
@@ -155,7 +157,6 @@ public class AmarthaloeChatHud {
 
         g.disableScissor();
 
-        // Полоска прокрутки справа (если чат открыт и строк больше, чем помещается)
         if (interactive && allLines.size() > maxVisibleLines) {
             int sbX = x + w - 5;
             int sbY = y + 3;
