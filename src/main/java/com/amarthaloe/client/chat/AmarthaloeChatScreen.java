@@ -17,7 +17,6 @@ public class AmarthaloeChatScreen extends ChatScreen {
     private int scrollOffsetLines = 0;
     private boolean showConfigPanel = false;
 
-    // Контекстное меню ПКМ по игроку
     private String contextTargetName = null;
     private int contextMenuX = 0;
     private int contextMenuY = 0;
@@ -32,11 +31,15 @@ public class AmarthaloeChatScreen extends ChatScreen {
     protected void init() {
         super.init();
 
+        // Очищаем ванильный буфер отображения чата, чтобы он не накладывался поверх нашего окна
+        if (this.minecraft != null && this.minecraft.gui != null) {
+            this.minecraft.gui.getChat().clearMessages(false);
+        }
+
         int boxX = AmarthaloeChatHud.BOX_X;
         int boxY = this.height - AmarthaloeChatHud.BOX_HEIGHT - 38;
         int tabY = boxY - 20;
 
-        // 1. Кнопки вкладок чата над окном
         int curX = boxX;
         for (int i = 0; i < AmarthaloeChatManager.TABS.size(); i++) {
             int idx = i;
@@ -53,18 +56,16 @@ public class AmarthaloeChatScreen extends ChatScreen {
             curX += bw + 2;
         }
 
-        // Кнопка [+] для создания новой вкладки
         if (AmarthaloeChatManager.TABS.size() < 7) {
             DarkButton addTabBtn = new DarkButton(curX, tabY, 18, 18, Component.literal("+"), (b) -> {
                 AmarthaloeChatManager.addNewCustomTab();
-                showConfigPanel = true; // Сразу открываем фильтр для новой вкладки
+                showConfigPanel = true;
                 this.rebuildWidgets();
             });
             this.addRenderableWidget(addTabBtn);
             curX += 20;
         }
 
-        // Кнопка [⚙] — открытие настройки шрифта и фильтров текущей вкладки
         DarkButton settingsBtn = new DarkButton(boxX + AmarthaloeChatHud.BOX_WIDTH - 22, tabY, 22, 18, Component.literal("⚙"), (b) -> {
             showConfigPanel = !showConfigPanel;
             this.rebuildWidgets();
@@ -72,13 +73,11 @@ public class AmarthaloeChatScreen extends ChatScreen {
         settingsBtn.setSelected(showConfigPanel);
         this.addRenderableWidget(settingsBtn);
 
-        // 2. Если открыта панель настроек чата и фильтров (справа от окна чата)
         if (showConfigPanel) {
             int px = boxX + AmarthaloeChatHud.BOX_WIDTH + 8;
             int py = boxY;
             AmarthaloeChatManager.ChatTab activeTab = AmarthaloeChatManager.getActiveTab();
 
-            // Фильтры каналов для активной вкладки
             int row = 0;
             for (AmarthaloeChatManager.Channel ch : AmarthaloeChatManager.Channel.values()) {
                 boolean enabled = activeTab.allowedChannels.contains(ch);
@@ -95,7 +94,6 @@ public class AmarthaloeChatScreen extends ChatScreen {
                 row++;
             }
 
-            // Настройка размера уютного шрифта
             String scaleStr = Math.round(AmarthaloeChatManager.fontScale * 100) + "%";
             DarkButton scaleBtn = new DarkButton(px + 6, py + 122, 72, 17, Component.literal("Шрифт: §e" + scaleStr), (b) -> {
                 if (AmarthaloeChatManager.fontScale < 0.95f) AmarthaloeChatManager.fontScale = 1.0f;
@@ -105,14 +103,12 @@ public class AmarthaloeChatScreen extends ChatScreen {
             });
             this.addRenderableWidget(scaleBtn);
 
-            // Настройка межстрочного интервала
             DarkButton spaceBtn = new DarkButton(px + 82, py + 122, 72, 17, Component.literal("Отступ: §e+" + AmarthaloeChatManager.lineSpacing), (b) -> {
                 AmarthaloeChatManager.lineSpacing = (AmarthaloeChatManager.lineSpacing % 5) + 1;
                 this.rebuildWidgets();
             });
             this.addRenderableWidget(spaceBtn);
 
-            // Время сообщений и удаление пользовательской вкладки
             DarkButton timeBtn = new DarkButton(px + 6, py + 141, 72, 17,
                     Component.literal("Время: " + (AmarthaloeChatManager.showTimestamps ? "§aВКЛ" : "§cВЫКЛ")), (b) -> {
                 AmarthaloeChatManager.showTimestamps = !AmarthaloeChatManager.showTimestamps;
@@ -132,20 +128,21 @@ public class AmarthaloeChatScreen extends ChatScreen {
 
     @Override
     public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+        if (this.minecraft != null && this.minecraft.gui != null) {
+            this.minecraft.gui.getChat().clearMessages(false);
+        }
+
         int boxX = AmarthaloeChatHud.BOX_X;
         int boxY = this.height - AmarthaloeChatHud.BOX_HEIGHT - 38;
         int boxW = AmarthaloeChatHud.BOX_WIDTH;
         int boxH = AmarthaloeChatHud.BOX_HEIGHT;
 
-        // 1. Рисуем наше золотисто-черное рельефное окно чата
         lineHitboxes.clear();
         List<AmarthaloeChatManager.ChatMessageEntry> filtered = AmarthaloeChatManager.getFilteredMessages();
         AmarthaloeChatHud.renderReliefChatBox(g, boxX, boxY, boxW, boxH, filtered, scrollOffsetLines, true, mouseX, mouseY, lineHitboxes);
 
-        // Подсказка под окном чата
         g.drawString(this.font, "§8💡 Нажмите ПКМ по строке игрока в чате для быстрых действий (Друзья / Группа / Гильдия / ЛС)", boxX + 2, boxY + boxH + 3, 0xFFAAAAAA);
 
-        // 2. Если открыта боковая панель фильтров и шрифта — рисуем её подложку
         if (showConfigPanel) {
             int px = boxX + boxW + 8;
             int py = boxY;
@@ -156,10 +153,8 @@ public class AmarthaloeChatScreen extends ChatScreen {
             g.drawString(this.font, "§6Фильтры: §e" + AmarthaloeChatManager.getActiveTab().name, px + 8, py + 8, 0xFFFFFFFF);
         }
 
-        // 3. Рисуем стандартную строку ввода и кнопки вкладок
         super.render(g, mouseX, mouseY, partialTick);
 
-        // 4. Рисуем всплывающее контекстное меню ПКМ по нику игрока поверх всего
         if (contextTargetName != null) {
             renderContextMenu(g, mouseX, mouseY);
         }
@@ -187,7 +182,6 @@ public class AmarthaloeChatScreen extends ChatScreen {
         g.fillGradient(mx, my, mx + menuW, my + menuH, 0xF51A150E, 0xF50D0B08);
         g.renderOutline(mx, my, menuW, menuH, 0xFFD4AF37);
 
-        // Шапка с именем выбранного игрока
         g.fill(mx + 1, my + 1, mx + menuW - 1, my + 16, 0xFF282015);
         g.drawCenteredString(this.font, "§6✦ §e" + contextTargetName, mx + menuW / 2, my + 4, 0xFFFFFFFF);
 
@@ -205,7 +199,6 @@ public class AmarthaloeChatScreen extends ChatScreen {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        // Обработка клика внутри открытого контекстного меню ПКМ
         if (contextTargetName != null) {
             int menuW = 148;
             int itemH = 16;
@@ -223,7 +216,6 @@ public class AmarthaloeChatScreen extends ChatScreen {
             if (button == 1) return true;
         }
 
-        // Правый клик (button == 1) по строке чата — открываем контекстное меню игрока!
         if (button == 1) {
             int boxX = AmarthaloeChatHud.BOX_X;
             int boxW = AmarthaloeChatHud.BOX_WIDTH;
@@ -252,8 +244,6 @@ public class AmarthaloeChatScreen extends ChatScreen {
 
         switch (actionIdx) {
             case 0 -> {
-                // ✉ Написать в ЛС — отправляем через команду или прямо в мессенджер по имени
-                PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("QUICK_DM_OPEN", targetName, ""));
                 this.input.setValue("/dm " + targetName + " ");
                 this.input.moveCursorToEnd(false);
             }
