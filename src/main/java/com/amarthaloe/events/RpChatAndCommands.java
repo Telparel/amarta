@@ -1,5 +1,6 @@
 package com.amarthaloe.events;
 
+import com.amarthaloe.data.OfflineMailStorage;
 import com.amarthaloe.data.PassportData;
 import com.amarthaloe.network.PassportNetworking;
 import com.mojang.brigadier.CommandDispatcher;
@@ -22,6 +23,7 @@ import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.event.CommandEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.ServerChatEvent;
+import net.neoforged.neoforge.network.PacketDistributor;
 
 import java.util.*;
 
@@ -37,7 +39,15 @@ public class RpChatAndCommands {
     public record PendingInteraction(String id, UUID senderUuid, UUID targetUuid, String type, long timestamp) {}
     private static final Map<String, PendingInteraction> PENDING_INTERACTIONS = new HashMap<>();
 
-    // --- 1. РАЗДЕЛЕНИЕ ЧАТА НА ЛОКАЛЬНЫЙ (100 БЛОКОВ) И ГЛОБАЛЬНЫЙ (!) ---
+    // Прикрепляет к сообщению невидимую метку имени автора, чтобы в чате по нему работал правый клик (ПКМ)
+    private static MutableComponent tagWithPlayer(MutableComponent comp, ServerPlayer sender) {
+        String rpName = getRpName(sender);
+        return comp.withStyle(comp.getStyle()
+                .withInsertion("amarthaloe_player:" + rpName)
+                .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                        Component.literal("§6✦ Персонаж: §e" + rpName + "\n§7Нажмите §eПКМ§7 для меню действий (Друзья / Группа / ЛС)"))));
+    }
+
     @SubscribeEvent
     public static void onServerChat(ServerChatEvent event) {
         ServerPlayer sender = event.getPlayer();
@@ -52,17 +62,19 @@ public class RpChatAndCommands {
             String globalText = rawMsg.substring(1).trim();
             if (globalText.isEmpty()) return;
 
-            MutableComponent msg = Component.literal("§6[Глобал] ")
-                    .append(formattedAuthor)
-                    .append(Component.literal(" §6» §e" + globalText));
+            MutableComponent msg = tagWithPlayer(
+                    Component.literal("§6[Глобал] ").append(formattedAuthor).append(Component.literal(" §6» §e" + globalText)),
+                    sender
+            );
 
             for (ServerPlayer p : sender.server.getPlayerList().getPlayers()) {
                 p.sendSystemMessage(msg);
             }
         } else {
-            MutableComponent msg = Component.literal("§7[Локал] ")
-                    .append(formattedAuthor)
-                    .append(Component.literal(" §8» §f" + rawMsg));
+            MutableComponent msg = tagWithPlayer(
+                    Component.literal("§7[Локал] ").append(formattedAuthor).append(Component.literal(" §8» §f" + rawMsg)),
+                    sender
+            );
 
             int listeners = sendInRadius(sender, LOCAL_RADIUS, msg);
             if (listeners <= 1 && sender.server.getPlayerList().getPlayers().size() > 1) {
@@ -71,7 +83,6 @@ public class RpChatAndCommands {
         }
     }
 
-    // Дополнительный перехватчик на случай, если клиент отправляет /me или /w как подписанный пакет
     @SubscribeEvent
     public static void onCommandPreprocess(CommandEvent event) {
         CommandSourceStack source = event.getParseResults().getContext().getSource();
@@ -85,14 +96,14 @@ public class RpChatAndCommands {
             String action = input.substring(3).trim();
             if (!action.isEmpty()) {
                 String name = getRpName(sender);
-                sendInRadius(sender, LOCAL_RADIUS, Component.literal("§d* " + name + " " + action));
+                sendInRadius(sender, LOCAL_RADIUS, tagWithPlayer(Component.literal("§d* " + name + " " + action), sender));
             }
         } else if (input.regionMatches(true, 0, "w ", 0, 2)) {
             event.setCanceled(true);
             String text = input.substring(2).trim();
             if (!text.isEmpty()) {
                 String name = getRpName(sender);
-                Component whisperMsg = Component.literal("§3[Шепот] §b" + name + " §7тихо шепчет: §7§o" + text);
+                Component whisperMsg = tagWithPlayer(Component.literal("§3[Шепот] §b" + name + " §7тихо шепчет: §7§o" + text), sender);
                 int heard = sendInRadius(sender, WHISPER_RADIUS, whisperMsg);
                 if (heard <= 1) {
                     sender.sendSystemMessage(Component.literal("§8§o* Рядом (в радиусе 5 блоков) нет никого, кто услышал бы ваш шепот."));
@@ -118,18 +129,46 @@ public class RpChatAndCommands {
         return (d.isLocked && !d.rpName.trim().isEmpty()) ? d.rpName : player.getName().getString();
     }
 
-    // --- 2. РЕГИСТРАЦИЯ РП-КОМАНД И ИНТЕРАКТИВНЫХ ДЕЙСТВИЙ ---
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
         CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
 
-        // ВАЖНО: Удаляем стандартные ванильные команды /me и /w из дерева Brigadier,
-        // чтобы они не конфликтовали своими аргументами подписи чата (MessageArgument) с нашими!
         dispatcher.getRoot().getChildren().removeIf(node ->
                 node.getName().equals("me") || node.getName().equals("w")
         );
 
-        // /w <текст> — Шепот в радиусе 5 блоков
+        // /dm <имя> <сообщение> — Быстрая отправка личного сообщения из контекстного меню ПКМ в чате
+        dispatcher.register(
+            Commands.literal("dm")
+                .then(Commands.argument("target", StringArgumentType.word())
+                    .then(Commands.argument("text", StringArgumentType.greedyString())
+                        .executes(ctx -> {
+                            ServerPlayer sender = ctx.getSource().getPlayerOrException();
+                            String targetQuery = StringArgumentType.getString(ctx, "target");
+                            String text = StringArgumentType.getString(ctx, "text");
+
+                            ServerPlayer found = PassportNetworking.findPlayerByNameOrRpName(sender, targetQuery);
+                            if (found == null) {
+                                sender.sendSystemMessage(Component.literal("§c[ЛС] Игрок «" + targetQuery + "» сейчас не в сети (для оффлайн-почты используйте меню [M] -> СООБЩЕНИЯ)."));
+                                return 0;
+                            }
+                            String senderName = getRpName(sender);
+                            String targetName = getRpName(found);
+                            String sharedLine = "§e" + senderName + ": §f" + text;
+
+                            OfflineMailStorage.get(sender.server).addMessage(sender.getStringUUID(), found.getStringUUID(), sharedLine, true);
+                            PacketDistributor.sendToPlayer(sender, new PassportNetworking.SocialActionPayload("RECEIVE_DM", found.getStringUUID(), sharedLine));
+                            PacketDistributor.sendToPlayer(found, new PassportNetworking.SocialActionPayload("RECEIVE_DM", sender.getStringUUID(), sharedLine));
+
+                            sender.sendSystemMessage(tagWithPlayer(Component.literal("§6[ЛС для §e" + targetName + "§6] §f" + text), found));
+                            found.sendSystemMessage(tagWithPlayer(Component.literal("§6[ЛС от §e" + senderName + "§6] §f" + text), sender));
+                            found.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.6f, 1.5f);
+                            return 1;
+                        })
+                    )
+                )
+        );
+
         dispatcher.register(
             Commands.literal("w")
                 .then(Commands.argument("message", StringArgumentType.greedyString())
@@ -138,7 +177,7 @@ public class RpChatAndCommands {
                         String text = StringArgumentType.getString(ctx, "message");
                         String name = getRpName(sender);
 
-                        Component whisperMsg = Component.literal("§3[Шепот] §b" + name + " §7тихо шепчет: §7§o" + text);
+                        Component whisperMsg = tagWithPlayer(Component.literal("§3[Шепот] §b" + name + " §7тихо шепчет: §7§o" + text), sender);
                         int heard = sendInRadius(sender, WHISPER_RADIUS, whisperMsg);
                         if (heard <= 1) {
                             sender.sendSystemMessage(Component.literal("§8§o* Рядом (в радиусе 5 блоков) нет никого, кто услышал бы ваш шепот."));
@@ -148,7 +187,6 @@ public class RpChatAndCommands {
                 )
         );
 
-        // /me <действие> — Отпись действия от 1-го лица персонажа
         dispatcher.register(
             Commands.literal("me")
                 .then(Commands.argument("action", StringArgumentType.greedyString())
@@ -157,14 +195,13 @@ public class RpChatAndCommands {
                         String action = StringArgumentType.getString(ctx, "action");
                         String name = getRpName(sender);
 
-                        Component rpMsg = Component.literal("§d* " + name + " " + action);
+                        Component rpMsg = tagWithPlayer(Component.literal("§d* " + name + " " + action), sender);
                         sendInRadius(sender, LOCAL_RADIUS, rpMsg);
                         return 1;
                     })
                 )
         );
 
-        // /do <описание> — Отпись окружения и событий от 3-го лица
         dispatcher.register(
             Commands.literal("do")
                 .then(Commands.argument("description", StringArgumentType.greedyString())
@@ -173,14 +210,13 @@ public class RpChatAndCommands {
                         String desc = StringArgumentType.getString(ctx, "description");
                         String name = getRpName(sender);
 
-                        Component doMsg = Component.literal("§b(( " + desc + " )) §8— §7" + name);
+                        Component doMsg = tagWithPlayer(Component.literal("§b(( " + desc + " )) §8— §7" + name), sender);
                         sendInRadius(sender, LOCAL_RADIUS, doMsg);
                         return 1;
                     })
                 )
         );
 
-        // /try <попытка> — Попытка действия (Вышло / Не вышло)
         dispatcher.register(
             Commands.literal("try")
                 .then(Commands.argument("attempt", StringArgumentType.greedyString())
@@ -191,7 +227,7 @@ public class RpChatAndCommands {
                         boolean success = RANDOM.nextBoolean();
 
                         String outcome = success ? "§8[§a§lВышло§8]" : "§8[§c§lНе вышло§8]";
-                        Component tryMsg = Component.literal("§d* " + name + " " + attempt + " " + outcome);
+                        Component tryMsg = tagWithPlayer(Component.literal("§d* " + name + " " + attempt + " " + outcome), sender);
                         sendInRadius(sender, LOCAL_RADIUS, tryMsg);
 
                         sender.level().playSound(null, sender.blockPosition(),
@@ -202,7 +238,6 @@ public class RpChatAndCommands {
                 )
         );
 
-        // /roll — Бросок кубика 1d20
         dispatcher.register(
             Commands.literal("roll")
                 .executes(ctx -> {
@@ -223,7 +258,7 @@ public class RpChatAndCommands {
                         rollFormat = "§e§l" + roll;
                     }
 
-                    Component rollMsg = Component.literal("§6🎲 §e" + name + " §7бросает кубик §f(1d20)§7: выпало " + rollFormat);
+                    Component rollMsg = tagWithPlayer(Component.literal("§6🎲 §e" + name + " §7бросает кубик §f(1d20)§7: выпало " + rollFormat), sender);
                     sendInRadius(sender, LOCAL_RADIUS, rollMsg);
 
                     sender.level().playSound(null, sender.blockPosition(), SoundEvents.AMETHYST_BLOCK_CHIME, SoundSource.PLAYERS, 1.0f, 0.8f + (roll / 20.0f) * 0.6f);
@@ -347,7 +382,7 @@ public class RpChatAndCommands {
                 default -> "§d* " + senderName + " взаимодействует с " + targetName + ".";
             };
 
-            sendInRadius(sender, LOCAL_RADIUS, Component.literal(actionLine));
+            sendInRadius(sender, LOCAL_RADIUS, tagWithPlayer(Component.literal(actionLine), sender));
 
             sLevel.sendParticles(ParticleTypes.HEART, sender.getX(), sender.getY() + 2.0, sender.getZ(), 5, 0.3, 0.2, 0.3, 0.02);
             sLevel.sendParticles(ParticleTypes.HEART, target.getX(), target.getY() + 2.0, target.getZ(), 5, 0.3, 0.2, 0.3, 0.02);
@@ -360,7 +395,7 @@ public class RpChatAndCommands {
                 default -> "§7* " + targetName + " отклоняет действие от " + senderName + ".";
             };
 
-            sendInRadius(sender, LOCAL_RADIUS, Component.literal(refuseLine));
+            sendInRadius(sender, LOCAL_RADIUS, tagWithPlayer(Component.literal(refuseLine), target));
             sLevel.sendParticles(ParticleTypes.SMOKE, target.getX(), target.getY() + 1.8, target.getZ(), 6, 0.2, 0.2, 0.2, 0.01);
             sLevel.playSound(null, target.blockPosition(), SoundEvents.VILLAGER_NO, SoundSource.PLAYERS, 0.5f, 1.0f);
         }
