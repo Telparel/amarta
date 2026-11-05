@@ -37,7 +37,7 @@ public class ClimateAndBiomeSystem {
         public float heat = 0.0f;       // 0..100 (Перегрев)
         public float thirst = 100.0f;   // 0..100 (Водный баланс: 100 = напоен, 0 = обезвоживание)
         public float toxicity = 0.0f;   // 0..100 (Индустриальный смог / Кислотный дождь в обычных биомах)
-        public inttotalWarmth = 0;     // Суммарная защита от холода текущей брони
+        public int totalWarmth = 0;     // Суммарная защита от холода текущей брони
     }
 
     private static final Map<UUID, PlayerClimateState> STATES = new HashMap<>();
@@ -176,7 +176,7 @@ public class ClimateAndBiomeSystem {
         float temp = biome.getBaseTemperature();
 
         PlayerClimateState st = getState(sp);
-        st.inttotalWarmth = getTotalPlayerWarmth(sp);
+        st.totalWarmth = getTotalPlayerWarmth(sp);
 
         boolean nearHeatSource = isNearHeatSource(level, pos, 4);
         boolean inWater = sp.isInWaterOrBubble();
@@ -202,8 +202,8 @@ public class ClimateAndBiomeSystem {
                 int neededWarmth = (isRaining || isNight) ? 80 : 55;
                 if (inWater) neededWarmth = 110; // Ледяная вода пробирает мгновенно
 
-                if (st.inttotalWarmth < neededWarmth) {
-                    float factor = (neededWarmth - st.inttotalWarmth) / 25.0f;
+                if (st.totalWarmth < neededWarmth) {
+                    float factor = (neededWarmth - st.totalWarmth) / 25.0f;
                     if (isRaining && underSky) factor *= 1.6f; // Снежная буря
                     st.cold = Math.min(100.0f, st.cold + factor);
                 } else {
@@ -327,7 +327,7 @@ public class ClimateAndBiomeSystem {
 
     public static void syncClimateToClient(ServerPlayer sp, PlayerClimateState st, int zone) {
         String dataStr = String.format(Locale.US, "%.1f|%.1f|%.1f|%.1f|%d|%d",
-                st.cold, st.heat, st.thirst, st.toxicity, st.inttotalWarmth, zone);
+                st.cold, st.heat, st.thirst, st.toxicity, st.totalWarmth, zone);
         PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("CLIMATE_SYNC", "", dataStr));
     }
 }
