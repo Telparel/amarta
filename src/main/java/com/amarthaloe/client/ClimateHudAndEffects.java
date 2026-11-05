@@ -3,18 +3,17 @@ package com.amarthaloe.client;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.particles.BlockParticleOption;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
-import net.minecraft.world.level.block.Blocks;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RenderGuiEvent;
+import net.neoforged.neoforge.client.event.ViewportEvent;
 
 import java.util.Random;
 
@@ -24,10 +23,11 @@ public class ClimateHudAndEffects {
     public static float clientCold = 0.0f;
     public static float clientHeat = 0.0f;
     public static float clientThirst = 100.0f;
-    public static float clientToxicity = 0.0f;
     public static int clientWarmth = 0;
-    public static int clientZone = 0; // 1 = Холод, 2 = Жара, 0 = Умеренный
+    public static int clientZone = 0; // 1 = Холод, 2 = Жара, 0 = Обычный
 
+    // Плавный коэффициент густоты бури (0.0 = ясно, 1.0 = максимальная буря с ограниченным обзором)
+    private static float stormFogIntensity = 0.0f;
     private static final Random RANDOM = new Random();
     private static int clientTicks = 0;
 
@@ -37,13 +37,12 @@ public class ClimateHudAndEffects {
             clientCold = Float.parseFloat(p[0]);
             clientHeat = Float.parseFloat(p[1]);
             clientThirst = Float.parseFloat(p[2]);
-            clientToxicity = Float.parseFloat(p[3]);
-            clientWarmth = Integer.parseInt(p[4]);
-            clientZone = Integer.parseInt(p[5]);
+            clientWarmth = Integer.parseInt(p[3]);
+            clientZone = Integer.parseInt(p[4]);
         } catch (Exception ignored) {}
     }
 
-    // --- 1. ВИЗУАЛЬНЫЕ БУРИ, ЧАСТИЦЫ И АТМОСФЕРНЫЕ ЗВУКИ БИОМОВ ---
+    // --- 1. ЗВУКИ БУРИ И ПЛАВНЫЙ РАСЧЕТ СНИЖЕНИЯ ОБЛАСТИ ЗРЕНИЯ ---
     @SubscribeEvent
     public static void onClientTick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
@@ -55,96 +54,100 @@ public class ClimateHudAndEffects {
         Biome biome = level.getBiome(pos).value();
         float temp = biome.getBaseTemperature();
         boolean underSky = level.canSeeSky(pos);
-        boolean isRaining = level.isRaining();
+        boolean isStormWeather = level.isRaining();
 
-        // А. ХОЛОДНЫЕ БИОМЫ: Снежные вихри, пар изо рта и завывание вьюги
+        float targetStorm = 0.0f;
+
+        // А. ХОЛОДНЫЕ БИОМЫ: Буран и морозное дыхание
         if (temp < 0.25f && underSky) {
-            int snowIntensity = isRaining ? 28 : 8; // В метель в 3.5 раза гуще!
-            for (int i = 0; i < snowIntensity; i++) {
-                double px = mc.player.getX() + (RANDOM.nextDouble() - 0.5) * 18.0;
-                double py = mc.player.getY() + RANDOM.nextDouble() * 8.0 - 1.0;
-                double pz = mc.player.getZ() + (RANDOM.nextDouble() - 0.5) * 18.0;
-                // Боковой шквальный ветер метели
-                level.addParticle(ParticleTypes.SNOWFLAKE, px, py, pz, 0.22, -0.08, 0.12);
-                if (isRaining && i % 3 == 0) {
-                    level.addParticle(ParticleTypes.WHITE_ASH, px, py, pz, 0.35, -0.04, 0.18);
-                }
+            if (isStormWeather) {
+                targetStorm = 1.0f; // Буран сильно снижает видимость
+            } else if (clientCold > 50.0f) {
+                targetStorm = (clientCold - 50.0f) / 100.0f;
             }
 
-            // Пар изо рта на морозе каждые 2.5 секунды
-            if (clientTicks % 50 == 0) {
+            // Легкий пар изо рта на морозе раз в 3 секунды
+            if (clientTicks % 60 == 0) {
                 var look = mc.player.getLookAngle();
                 level.addParticle(ParticleTypes.CLOUD,
                         mc.player.getX() + look.x * 0.4,
                         mc.player.getEyeY() - 0.1,
                         mc.player.getZ() + look.z * 0.4,
-                        look.x * 0.03, 0.01, look.z * 0.03);
+                        look.x * 0.02, 0.01, look.z * 0.02);
             }
 
-            // Звук ледяной вьюги и хруста льда
-            if (clientTicks % (isRaining ? 45 : 90) == 0) {
-                level.playLocalSound(pos, SoundEvents.ELYTRA_FLYING, SoundSource.AMBIENT, isRaining ? 0.35f : 0.15f, 0.55f, false);
+            // Звук завывающей вьюги
+            if (clientTicks % (isStormWeather ? 45 : 95) == 0) {
+                level.playLocalSound(pos, SoundEvents.ELYTRA_FLYING, SoundSource.AMBIENT, isStormWeather ? 0.35f : 0.12f, 0.55f, false);
             }
-            if (clientCold > 50 && clientTicks % 70 == 0) {
-                level.playLocalSound(pos, SoundEvents.PLAYER_HURT_FREEZE, SoundSource.PLAYERS, 0.35f, 1.3f, false);
+            if (clientCold > 60 && clientTicks % 75 == 0) {
+                level.playLocalSound(pos, SoundEvents.PLAYER_HURT_FREEZE, SoundSource.PLAYERS, 0.3f, 1.3f, false);
             }
         }
-        // Б. ЖАРКИЕ БИОМЫ: Песчаные бури, пыльные вихри и гул суховея
+        // Б. ЖАРКИЕ БИОМЫ: Песчаная буря и гул суховея
         else if (temp >= 0.95f && underSky) {
-            boolean sandstorm = isRaining || clientHeat > 45.0f;
-            int sandCount = isRaining ? 40 : (sandstorm ? 16 : 5);
-            BlockParticleOption sandParticle = new BlockParticleOption(ParticleTypes.FALLING_DUST, Blocks.SAND.defaultBlockState());
-
-            for (int i = 0; i < sandCount; i++) {
-                double px = mc.player.getX() + (RANDOM.nextDouble() - 0.5) * 16.0;
-                double py = mc.player.getY() + RANDOM.nextDouble() * 6.0;
-                double pz = mc.player.getZ() + (RANDOM.nextDouble() - 0.5) * 16.0;
-                level.addParticle(sandParticle, px, py, pz, 0.4, -0.02, 0.2);
-                if (isRaining && i % 2 == 0) {
-                    level.addParticle(ParticleTypes.ASH, px, py, pz, 0.5, 0.02, 0.25);
-                }
+            if (isStormWeather) {
+                targetStorm = 1.0f; // Песчаная буря плотно закрывает обзор
+            } else if (clientHeat > 55.0f) {
+                targetStorm = (clientHeat - 55.0f) / 90.0f;
             }
 
-            // Акустика песчаной бури и сухого ветра пустыни
-            if (clientTicks % (isRaining ? 40 : 85) == 0) {
-                level.playLocalSound(pos, SoundEvents.BREEZE_IDLE_GROUND, SoundSource.AMBIENT, isRaining ? 0.6f : 0.25f, 0.6f, false);
+            if (clientTicks % (isStormWeather ? 40 : 90) == 0) {
+                level.playLocalSound(pos, SoundEvents.BREEZE_IDLE_GROUND, SoundSource.AMBIENT, isStormWeather ? 0.55f : 0.2f, 0.6f, false);
             }
         }
-        // В. ОБЫЧНЫЕ БИОМЫ: Индустриальный пепел во время кислотного дождя или живая атмосфера в ясную погоду
-        else if (underSky) {
-            if (isRaining || clientToxicity > 20.0f) {
-                for (int i = 0; i < 12; i++) {
-                    double px = mc.player.getX() + (RANDOM.nextDouble() - 0.5) * 14.0;
-                    double py = mc.player.getY() + RANDOM.nextDouble() * 6.0;
-                    double pz = mc.player.getZ() + (RANDOM.nextDouble() - 0.5) * 14.0;
-                    level.addParticle(ParticleTypes.ASH, px, py, pz, 0.02, -0.05, 0.02);
-                    if (i % 4 == 0) {
-                        level.addParticle(ParticleTypes.SPORE_BLOSSOM_AIR, px, py, pz, 0.0, -0.03, 0.0);
-                    }
-                }
-                if (clientTicks % 80 == 0) {
-                    level.playLocalSound(pos, SoundEvents.LAVA_EXTINGUISH, SoundSource.AMBIENT, 0.15f, 1.6f, false);
-                }
-            } else {
-                // Спокойная атмосфера окраин Исономии: редкая пыльца/листва на ветру и пение птиц/шелест
-                if (clientTicks % 6 == 0) {
-                    double px = mc.player.getX() + (RANDOM.nextDouble() - 0.5) * 12.0;
-                    double py = mc.player.getY() + RANDOM.nextDouble() * 5.0;
-                    double pz = mc.player.getZ() + (RANDOM.nextDouble() - 0.5) * 12.0;
-                    level.addParticle(ParticleTypes.WHITE_ASH, px, py, pz, 0.03, -0.01, 0.02);
-                }
-                if (clientTicks % 160 == 0) {
-                    if (level.isDay()) {
-                        level.playLocalSound(pos, SoundEvents.PARROT_AMBIENT, SoundSource.AMBIENT, 0.25f, 0.85f + RANDOM.nextFloat() * 0.3f, false);
-                    } else {
-                        level.playLocalSound(pos, SoundEvents.BEACON_AMBIENT, SoundSource.AMBIENT, 0.2f, 0.5f, false);
-                    }
-                }
-            }
+
+        // Плавно меняем плотность тумана бури, чтобы обзор сужался и расширялся естественно
+        if (stormFogIntensity < targetStorm) {
+            stormFogIntensity = Math.min(targetStorm, stormFogIntensity + 0.015f);
+        } else if (stormFogIntensity > targetStorm) {
+            stormFogIntensity = Math.max(targetStorm, stormFogIntensity - 0.015f);
         }
     }
 
-    // --- 2. ОТРИСОВКА ЭКРАННЫХ ЭФФЕКТОВ БУРИ, ИЗМОРОЗИ, ЖАРЫ И ШКАЛ КЛИМАТА ---
+    // --- 2. СНИЖЕНИЕ ДАЛЬНОСТИ ОБЗОРА В БУРАНЕ И ПЕСЧАНОЙ БУРЕ ---
+    @SubscribeEvent
+    public static void onRenderFog(ViewportEvent.RenderFog event) {
+        if (stormFogIntensity <= 0.01f) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null || mc.player.isCreative() || mc.player.isSpectator()) return;
+
+        float origFar = event.getFarPlaneDistance();
+        // На пике бурана или песчаной бури видимость падает до 14 блоков!
+        float stormFar = 14.0f;
+        float newFar = origFar + (stormFar - origFar) * stormFogIntensity;
+
+        event.setNearPlaneDistance(Math.max(1.5f, newFar * 0.15f));
+        event.setFarPlaneDistance(newFar);
+        event.setCanceled(true);
+    }
+
+    // --- 3. ОКРАШИВАНИЕ ТУМАНА (БЕЛАЯ МГЛА В МЕТЕЛЬ / ПЕСЧАНАЯ МГЛА В ПУСТЫНЕ) ---
+    @SubscribeEvent
+    public static void onComputeFogColor(ViewportEvent.ComputeFogColor event) {
+        if (stormFogIntensity <= 0.01f) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null || mc.level == null) return;
+
+        float temp = mc.level.getBiome(mc.player.blockPosition()).value().getBaseTemperature();
+        if (temp < 0.25f) {
+            // Холодная снежная мгла бурана
+            event.setRed(lerp(event.getRed(), 0.85f, stormFogIntensity));
+            event.setGreen(lerp(event.getGreen(), 0.92f, stormFogIntensity));
+            event.setBlue(lerp(event.getBlue(), 0.98f, stormFogIntensity));
+        } else if (temp >= 0.95f) {
+            // Густая пыльно-желтая пелена песчаной бури
+            event.setRed(lerp(event.getRed(), 0.82f, stormFogIntensity));
+            event.setGreen(lerp(event.getGreen(), 0.64f, stormFogIntensity));
+            event.setBlue(lerp(event.getBlue(), 0.36f, stormFogIntensity));
+        }
+    }
+
+    private static float lerp(float start, float end, float delta) {
+        return start + (end - start) * Math.clamp(delta, 0.0f, 1.0f);
+    }
+
+    // --- 4. ОТРИСОВКА КРАЕВ ЭКРАНА И ШКАЛ ХОЛОДА / ЖАРЫ / ВОДЫ ---
     @SubscribeEvent
     public static void onRenderGui(RenderGuiEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
@@ -154,29 +157,17 @@ public class ClimateHudAndEffects {
         int sw = mc.getWindow().getGuiScaledWidth();
         int sh = mc.getWindow().getGuiScaledHeight();
 
-        // 1. Полноэкранные атмосферные виньетки при экстремальном климате или буре
-        boolean isRaining = mc.level != null && mc.level.isRaining() && mc.level.canSeeSky(mc.player.blockPosition());
-
-        if (clientZone == 1 && (clientCold > 15.0f || isRaining)) {
-            // Ледяная дымка метели и обмерзание краев экрана
-            int alpha = (int) Math.min(140, clientCold * 1.2f + (isRaining ? 35 : 0));
-            int col = (alpha << 24) | 0x78C8FF;
-            drawScreenEdgesVignette(g, sw, sh, col, 28);
-        } else if (clientZone == 2 && (clientHeat > 15.0f || isRaining)) {
-            // Песчаная мгла и солнечное марево по краям экрана
-            int alpha = (int) Math.min(150, clientHeat * 1.2f + (isRaining ? 55 : 0));
-            int col = (alpha << 24) | (isRaining ? 0xC89646 : 0xFF7828);
-            drawScreenEdgesVignette(g, sw, sh, col, 32);
-        } else if (clientToxicity > 15.0f) {
-            // Кислотно-пепельный смог Исономии
-            int alpha = (int) Math.min(130, clientToxicity * 1.2f);
-            int col = (alpha << 24) | 0x558B46;
-            drawScreenEdgesVignette(g, sw, sh, col, 24);
+        if (clientZone == 1 && (clientCold > 20.0f || stormFogIntensity > 0.2f)) {
+            int alpha = (int) Math.min(135, clientCold * 1.1f + stormFogIntensity * 45.0f);
+            drawScreenEdgesVignette(g, sw, sh, (alpha << 24) | 0x78C8FF, 26);
+        } else if (clientZone == 2 && (clientHeat > 20.0f || stormFogIntensity > 0.2f)) {
+            int alpha = (int) Math.min(140, clientHeat * 1.1f + stormFogIntensity * 50.0f);
+            drawScreenEdgesVignette(g, sw, sh, (alpha << 24) | 0xD88A38, 28);
         }
 
-        // 2. Компактная приборная панель выживания справа над хотбаром
+        // Компактная панель выживания справа над хотбаром (только Вода и Холод/Жара/Тепло брони)
         int panelW = 92;
-        int panelH = (clientToxicity > 2.0f) ? 38 : 28;
+        int panelH = 28;
         int px = sw / 2 + 96;
         int py = sh - panelH - 4;
 
@@ -197,12 +188,6 @@ public class ClimateHudAndEffects {
         } else {
             drawMiniBar(g, mc, px + 4, py + 15, 84, clientWarmth / 100.0f, 0xFF42A868,
                     "🛡 Тепло брони: " + clientWarmth + "%");
-        }
-
-        // Полоска 3 (появляется при кислотных осадках / смоге в обычных биомах)
-        if (clientToxicity > 2.0f) {
-            drawMiniBar(g, mc, px + 4, py + 26, 84, clientToxicity / 100.0f, 0xFF68B832,
-                    "☣ Смог: " + Math.round(clientToxicity) + "%");
         }
     }
 
