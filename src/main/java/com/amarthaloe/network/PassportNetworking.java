@@ -241,7 +241,6 @@ public class PassportNetworking {
                             handleServerSocialAction(sender, payload.action(), payload.target(), payload.extra());
                         } else if (context.flow().isClientbound()) {
                             switch (payload.action()) {
-                                case "CLIMATE_SYNC" -> com.amarthaloe.client.ClimateHudAndEffects.updateFromNetwork(payload.extra());
                                 case "RECEIVE_DM" -> addClientMessage(payload.target(), payload.extra());
                                 case "CLEAR_HISTORY" -> CLIENT_DM_HISTORY.remove(payload.target());
                                 case "SET_UNREAD" -> {
