@@ -24,30 +24,31 @@ public class AmarthaloeChatHud {
     public static final int BOX_WIDTH = 330;
     public static final int BOX_HEIGHT = 145;
 
-    // 1. Записываем все входящие сообщения в наш менеджер и блокируем их попадание в ванильный чат!
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onChatReceived(ClientChatReceivedEvent event) {
         if (event.isSystem() && event.getMessage().getString().isEmpty()) return;
-        // Не трогаем сообщения над хотбаром (Action Bar / Overlay)
         if (event instanceof ClientChatReceivedEvent.System sys && sys.isOverlay()) return;
 
         Minecraft mc = Minecraft.getInstance();
         long ticks = mc.gui != null ? mc.gui.getGuiTicks() : 0;
         AmarthaloeChatManager.recordIncomingMessage(event.getMessage(), ticks);
 
-        // Отменяем добавление в стандартный ванильный ChatComponent, чтобы он не дублировал текст!
+        // Блокируем попадание сообщения в ванильный HUD, чтобы он оставался чистым
         event.setCanceled(true);
     }
 
-    // 2. Подменяем стандартный экран чата (по клавише T или /) на наш кастомный
     @SubscribeEvent
     public static void onScreenOpening(ScreenEvent.Opening event) {
-        if (event.getNewScreen() instanceof ChatScreen && !(event.getNewScreen() instanceof AmarthaloeChatScreen)) {
-            event.setNewScreen(new AmarthaloeChatScreen(""));
+        if (event.getNewScreen() instanceof ChatScreen orig && !(event.getNewScreen() instanceof AmarthaloeChatScreen)) {
+            // Если чат открыли клавишей "/" (команда), сохраняем начальный слэш!
+            String initialText = "";
+            if (Minecraft.getInstance().options.keyCommand.isDown()) {
+                initialText = "/";
+            }
+            event.setNewScreen(new AmarthaloeChatScreen(initialText));
         }
     }
 
-    // 3. Отключаем ванильный рендер чата и рисуем золотисто-черное окно
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onRenderChatLayer(RenderGuiLayerEvent.Pre event) {
         if (!event.getName().equals(VanillaGuiLayers.CHAT)) return;
@@ -55,9 +56,6 @@ public class AmarthaloeChatHud {
 
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.options.hideGui) return;
-        // Очищаем остатки ванильного буфера на случай прямых вызовов
-        mc.gui.getChat().clearMessages(false);
-
         if (mc.screen instanceof AmarthaloeChatScreen) return;
 
         long currentTicks = mc.gui.getGuiTicks();
