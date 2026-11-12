@@ -8,6 +8,7 @@ import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.sounds.SoundEvents;
 import net.neoforged.neoforge.network.PacketDistributor;
+import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -29,11 +30,13 @@ public class AmarthaloeChatScreen extends ChatScreen {
 
     @Override
     protected void init() {
+        // Сохраняем текущий текст перед перестройкой виджетов (чтобы при клике по вкладкам текст не пропадал)
+        String savedText = (this.input != null) ? this.input.getValue() : "";
+
         super.init();
 
-        // Очищаем ванильный буфер отображения чата, чтобы он не накладывался поверх нашего окна
-        if (this.minecraft != null && this.minecraft.gui != null) {
-            this.minecraft.gui.getChat().clearMessages(false);
+        if (!savedText.isEmpty() && this.input != null) {
+            this.input.setValue(savedText);
         }
 
         int boxX = AmarthaloeChatHud.BOX_X;
@@ -124,14 +127,57 @@ public class AmarthaloeChatScreen extends ChatScreen {
                 this.addRenderableWidget(delTabBtn);
             }
         }
+
+        // ВАЖНО: Всегда возвращаем фокус клавиатуры на поле ввода чата после добавления любых кнопок!
+        if (this.input != null) {
+            this.setFocused(this.input);
+            this.input.setFocused(true);
+        }
+    }
+
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        // Гарантируем, что поле ввода всегда в фокусе при нажатии любых клавиш
+        if (this.input != null && !this.input.isFocused()) {
+            this.setFocused(this.input);
+            this.input.setFocused(true);
+        }
+
+        // Прямая обработка Enter / Numpad Enter, чтобы команды из истории (на стрелку вверх) всегда отправлялись!
+        if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
+            if (this.input != null) {
+                String text = this.input.getValue();
+                this.handleChatInput(text, true);
+            }
+            if (this.minecraft != null) {
+                this.minecraft.setScreen(null);
+            }
+            return true;
+        }
+
+        // Обработка стрелок Вверх / Вниз для навигации по прошлым командам и сообщениям
+        if (keyCode == GLFW.GLFW_KEY_UP) {
+            this.moveInHistory(-1);
+            if (this.input != null) {
+                this.setFocused(this.input);
+                this.input.setFocused(true);
+            }
+            return true;
+        }
+        if (keyCode == GLFW.GLFW_KEY_DOWN) {
+            this.moveInHistory(1);
+            if (this.input != null) {
+                this.setFocused(this.input);
+                this.input.setFocused(true);
+            }
+            return true;
+        }
+
+        return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
     @Override
     public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
-        if (this.minecraft != null && this.minecraft.gui != null) {
-            this.minecraft.gui.getChat().clearMessages(false);
-        }
-
         int boxX = AmarthaloeChatHud.BOX_X;
         int boxY = this.height - AmarthaloeChatHud.BOX_HEIGHT - 38;
         int boxW = AmarthaloeChatHud.BOX_WIDTH;
@@ -234,7 +280,13 @@ public class AmarthaloeChatScreen extends ChatScreen {
             }
         }
 
-        return super.mouseClicked(mouseX, mouseY, button);
+        boolean res = super.mouseClicked(mouseX, mouseY, button);
+        // После клика по любой вкладке или кнопке сразу возвращаем фокус на строку ввода чата!
+        if (this.input != null) {
+            this.setFocused(this.input);
+            this.input.setFocused(true);
+        }
+        return res;
     }
 
     private void executeContextAction(int actionIdx, String targetName) {
@@ -246,6 +298,8 @@ public class AmarthaloeChatScreen extends ChatScreen {
             case 0 -> {
                 this.input.setValue("/dm " + targetName + " ");
                 this.input.moveCursorToEnd(false);
+                this.setFocused(this.input);
+                this.input.setFocused(true);
             }
             case 1 -> PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("ADD_FRIEND", targetName, ""));
             case 2 -> PacketDistributor.sendToServer(new PassportNetworking.SocialActionPayload("INVITE_PARTY", targetName, ""));
