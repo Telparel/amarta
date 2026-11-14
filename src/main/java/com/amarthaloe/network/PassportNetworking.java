@@ -241,6 +241,8 @@ public class PassportNetworking {
                             handleServerSocialAction(sender, payload.action(), payload.target(), payload.extra());
                         } else if (context.flow().isClientbound()) {
                             switch (payload.action()) {
+                                case "AUTH_PROMPT" -> com.amarthaloe.client.gui.AmarthaloeAuthScreen.handleServerPrompt(payload.target());
+                                case "AUTH_RESULT" -> com.amarthaloe.client.gui.AmarthaloeAuthScreen.handleServerResult(payload.target(), payload.extra());
                                 case "RECEIVE_DM" -> addClientMessage(payload.target(), payload.extra());
                                 case "CLEAR_HISTORY" -> CLIENT_DM_HISTORY.remove(payload.target());
                                 case "SET_UNREAD" -> {
@@ -258,6 +260,12 @@ public class PassportNetworking {
     }
 
     private static void handleServerSocialAction(ServerPlayer sender, String action, String targetStr, String extra) {
+        // Авторизация обрабатывается в первую очередь
+        if ("AUTH_SUBMIT".equals(action)) {
+            com.amarthaloe.events.AuthEvents.handleClientAuthSubmit(sender, targetStr, extra);
+            return;
+        }
+
         PassportData senderData = sender.getData(PassportData.PASSPORT);
         String senderUuid = sender.getStringUUID();
         String senderName = senderData.rpName.isEmpty() ? sender.getName().getString() : senderData.rpName;
@@ -391,6 +399,7 @@ public class PassportNetworking {
                 ServerEvents.syncPlayerDataWithOnlineStatus(sender);
             }
 
+            // --- СИСТЕМА ГРУПП ---
             case "INVITE_PARTY" -> ServerEvents.handlePartyInvite(sender, targetStr);
             case "PARTY_ACCEPT" -> ServerEvents.handlePartyAccept(sender, targetStr);
             case "PARTY_DECLINE" -> ServerEvents.handlePartyDecline(sender);
@@ -398,6 +407,7 @@ public class PassportNetworking {
             case "PARTY_KICK" -> ServerEvents.handlePartyLeaveOrKick(sender, targetStr);
             case "PARTY_LEAVE" -> ServerEvents.handlePartyLeaveOrKick(sender, senderUuid);
 
+            // --- СИСТЕМА СОДРУЖЕСТВ ---
             case "GUILD_CREATE" -> ServerEvents.handleGuildCreate(sender, targetStr, extra);
             case "GUILD_INVITE" -> ServerEvents.handleGuildInvite(sender, targetStr);
             case "GUILD_ACCEPT" -> ServerEvents.handleGuildAccept(sender, targetStr);
@@ -409,12 +419,11 @@ public class PassportNetworking {
             case "GUILD_KICK" -> ServerEvents.handleGuildKickOrLeave(sender, targetStr);
             case "GUILD_LEAVE" -> ServerEvents.handleGuildKickOrLeave(sender, senderUuid);
 
+            // --- ДОСКА ОБЪЯВЛЕНИЙ И КНИЖНАЯ ПОЛКА ---
             case "BOARD_ACCEPT_QUEST" -> ServerEvents.handleBoardAcceptQuest(sender, targetStr);
             case "BOARD_COMPLETE_QUEST" -> ServerEvents.handleBoardCompleteQuest(sender, targetStr);
             case "BOARD_POST_NOTE" -> ServerEvents.handleBoardPostNote(sender, targetStr, extra);
             case "BOARD_REMOVE_NOTE" -> ServerEvents.handleBoardRemoveNote(sender, targetStr);
-
-            // Помещение найденной в игре книги на книжную полку
             case "SHELF_INSERT_BOOK" -> ServerEvents.handleShelfInsertBook(sender);
 
             case "MARK_READ" -> {
