@@ -44,7 +44,6 @@ public class AuthEvents {
         }
     }
 
-    // Игроки, которые прямо сейчас находятся на этапе ввода пароля
     private static final Map<UUID, PendingSession> UNAUTHENTICATED = new HashMap<>();
 
     public static boolean isUnauthenticated(ServerPlayer player) {
@@ -58,7 +57,10 @@ public class AuthEvents {
             boolean registered = auth.isRegistered(sp.getStringUUID());
             UNAUTHENTICATED.put(sp.getUUID(), new PendingSession(sp, registered));
 
-            // Отправляем клиенту приказ открыть окно Регистрации или Входа
+            // Отключаем гравитацию на время ввода пароля, чтобы игрок не падал и не дергал чанки
+            sp.setDeltaMovement(Vec3.ZERO);
+
+            // Отправляем только 1 маленький пакет открытия окна авторизации
             PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload(
                     "AUTH_PROMPT", registered ? "LOGIN" : "REGISTER", ""
             ));
@@ -72,10 +74,9 @@ public class AuthEvents {
         }
     }
 
-    // Обработка пакета с паролем от клиента
     public static void handleClientAuthSubmit(ServerPlayer sp, String mode, String password) {
         PendingSession session = UNAUTHENTICATED.get(sp.getUUID());
-        if (session == null) return; // Уже авторизован
+        if (session == null) return;
 
         String pass = password.trim();
         if (pass.length() < 4 || pass.length() > 32) {
@@ -89,20 +90,24 @@ public class AuthEvents {
         AuthStorage auth = AuthStorage.get(sp.server);
 
         if (!session.isRegistered) {
-            // Регистрация нового пароля
             auth.registerPassword(sp.getStringUUID(), pass);
             UNAUTHENTICATED.remove(sp.getUUID());
 
             PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("AUTH_RESULT", "SUCCESS", ""));
             sp.sendSystemMessage(Component.literal("§6[Безопасность Либры] §aВаш пароль успешно зарегистрирован! Приятной игры в Исономии."));
             sp.playNotifySound(SoundEvents.PLAYER_LEVELUP, SoundSource.MASTER, 0.8f, 1.2f);
+
+            // Загружаем данные игрока только ПОСЛЕ успешной регистрации пароля!
+            ServerEvents.onPlayerAuthenticated(sp);
         } else {
-            // Проверка существующего пароля
             if (auth.verifyPassword(sp.getStringUUID(), pass)) {
                 UNAUTHENTICATED.remove(sp.getUUID());
                 PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload("AUTH_RESULT", "SUCCESS", ""));
                 sp.sendSystemMessage(Component.literal("§6[Безопасность Либры] §aЛичность подтверждена. Доступ к Исономии открыт!"));
                 sp.playNotifySound(SoundEvents.EXPERIENCE_ORB_PICKUP, SoundSource.MASTER, 0.8f, 1.3f);
+
+                // Загружаем данные игрока только ПОСЛЕ успешного ввода пароля!
+                ServerEvents.onPlayerAuthenticated(sp);
             } else {
                 session.failedAttempts++;
                 if (session.failedAttempts >= 3) {
@@ -119,7 +124,6 @@ public class AuthEvents {
         }
     }
 
-    // Удержание неавторизованных игроков на месте и тайм-аут 60 секунд
     @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
         if (UNAUTHENTICATED.isEmpty()) return;
@@ -129,26 +133,28 @@ public class AuthEvents {
             if (session == null) continue;
 
             session.ticksWaiting++;
+            sp.setDeltaMovement(Vec3.ZERO);
+            sp.fallDistance = 0.0f;
 
-            // Каждые 10 тиков возвращаем игрока на точку входа, если он сдвинулся, и переоткрываем окно, если оно закрылось
-            if (sp.position().distanceToSqr(session.loginPos) > 0.04) {
-                sp.teleportTo(session.loginPos.x, session.loginPos.y, session.loginPos.z);
+            // ВАЖНО: Вместо тяжелого sp.teleportTo(...) используем легкий connection.teleport только при сильном смещении (> 1.5 блока)
+            // Это НЕ перезапускает генератор чанков и не вызывает лагов со Streams!
+            if (sp.position().distanceToSqr(session.loginPos) > 2.25 && session.ticksWaiting % 20 == 0) {
+                sp.connection.teleport(session.loginPos.x, session.loginPos.y, session.loginPos.z, session.yRot, session.xRot);
             }
-            if (session.ticksWaiting % 30 == 0) {
+
+            if (session.ticksWaiting % 40 == 0) {
                 PacketDistributor.sendToPlayer(sp, new PassportNetworking.SocialActionPayload(
                         "AUTH_PROMPT", session.isRegistered ? "LOGIN" : "REGISTER", ""
                 ));
             }
 
-            // Если за 60 секунд (1200 тиков) пароль не введен — кикаем
-            if (session.ticksWaiting > 1200) {
+            if (session.ticksWaiting > 1800) { // 90 секунд на ввод с учетом прогрузки мира
                 UNAUTHENTICATED.remove(sp.getUUID());
-                sp.connection.disconnect(Component.literal("§c[Безопасность Либры]\n§fВремя ожидания авторизации истекло (60 сек)."));
+                sp.connection.disconnect(Component.literal("§c[Безопасность Либры]\n§fВремя ожидания авторизации истекло."));
             }
         }
     }
 
-    // --- ПОЛНАЯ ЗАЩИТА НЕАВТОРИЗОВАННОГО ИГРОКА ---
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onDamage(LivingIncomingDamageEvent event) {
         if (event.getEntity() instanceof ServerPlayer sp && isUnauthenticated(sp)) {
@@ -206,7 +212,6 @@ public class AuthEvents {
         }
     }
 
-    // Команда для администрации: /auth reset <игрок>
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
         event.getDispatcher().register(
