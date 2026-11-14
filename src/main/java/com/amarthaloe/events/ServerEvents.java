@@ -106,6 +106,9 @@ public class ServerEvents {
         if (tickCounter % 20 == 0) {
             OfflineMailStorage mail = OfflineMailStorage.get(event.getServer());
             for (ServerPlayer sp : event.getServer().getPlayerList().getPlayers()) {
+                // Не нагружаем сеть пакетами, пока игрок еще вводит пароль и грузит чанки
+                if (AuthEvents.isUnauthenticated(sp)) continue;
+
                 Vec3 now = sp.position();
                 Vec3 prev = LAST_PLAYER_POS.put(sp.getUUID(), now);
                 if (prev != null && prev.distanceToSqr(now) < 400) {
@@ -143,7 +146,9 @@ public class ServerEvents {
             if (npcQuests < 15) {
                 mail.spawnRandomNpcQuest(new Random());
                 for (ServerPlayer sp : event.getServer().getPlayerList().getPlayers()) {
-                    syncPartyAndGuildToPlayer(sp, false, true);
+                    if (!AuthEvents.isUnauthenticated(sp)) {
+                        syncPartyAndGuildToPlayer(sp, false, true);
+                    }
                 }
             }
         }
@@ -239,7 +244,6 @@ public class ServerEvents {
         }
     }
 
-    // Создает физический предмет лорной книги в инвентарь игрока
     public static ItemStack createLoreBookItem(LoreBookRegistry.LoreBook book) {
         ItemStack stack = new ItemStack(Items.ENCHANTED_BOOK);
         stack.set(DataComponents.CUSTOM_NAME, Component.literal("§6📖 Запечатанный Том: §e" + book.spineTitle()));
@@ -308,7 +312,6 @@ public class ServerEvents {
         data.activeQuests.remove(questId);
         data.nomes += q.rewardNomes;
 
-        // Если за этот контракт полагается секретная лорная книга — ставим её на полку игрока!
         if (q.rewardBookId != null && !q.rewardBookId.isEmpty()) {
             LoreBookRegistry.LoreBook unlockedBook = LoreBookRegistry.byId(q.rewardBookId);
             if (unlockedBook != null && !data.unlockedBooks.contains(q.rewardBookId)) {
@@ -334,7 +337,9 @@ public class ServerEvents {
         changeRep(player.createCommandSourceStack(), player, q.factionId, q.rewardRep, true);
 
         for (ServerPlayer sp : player.server.getPlayerList().getPlayers()) {
-            syncPartyAndGuildToPlayer(sp, false, true);
+            if (!AuthEvents.isUnauthenticated(sp)) {
+                syncPartyAndGuildToPlayer(sp, false, true);
+            }
         }
     }
 
@@ -349,7 +354,9 @@ public class ServerEvents {
         sender.playNotifySound(SoundEvents.BOOK_PAGE_TURN, SoundSource.MASTER, 1.0f, 1.2f);
 
         for (ServerPlayer sp : sender.server.getPlayerList().getPlayers()) {
-            syncPartyAndGuildToPlayer(sp, false, true);
+            if (!AuthEvents.isUnauthenticated(sp)) {
+                syncPartyAndGuildToPlayer(sp, false, true);
+            }
         }
     }
 
@@ -362,7 +369,9 @@ public class ServerEvents {
             mail.setDirty();
             sender.sendSystemMessage(Component.literal("§6[Доска Объявлений] §7Листовка снята с доски."));
             for (ServerPlayer sp : sender.server.getPlayerList().getPlayers()) {
-                syncPartyAndGuildToPlayer(sp, false, true);
+                if (!AuthEvents.isUnauthenticated(sp)) {
+                    syncPartyAndGuildToPlayer(sp, false, true);
+                }
             }
         }
     }
@@ -945,43 +954,49 @@ public class ServerEvents {
     @SubscribeEvent
     public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer sp) {
-            PassportData data = sp.getData(PassportData.PASSPORT);
+            // При самом подключении обновляем только имя, не нагружая сеть пакетами до ввода пароля!
             refreshAllNames(sp);
+        }
+    }
 
-            if (!data.isLocked) {
-                sp.sendSystemMessage(Component.literal("§8§m======================================================"));
-                sp.sendSystemMessage(Component.literal("§6§l Добро пожаловать в Амарталоэ и суровую Исономию!"));
-                sp.sendSystemMessage(Component.literal("§7 Мир разделен на фракции, законы и контракты Либры."));
-                sp.sendSystemMessage(Component.literal("§e➤ Нажмите клавишу §b[M]§e, чтобы открыть главное меню мода."));
-                sp.sendSystemMessage(Component.literal("§c⚠ Обязательно заполните паспорт персонажа во вкладке «ИГРОК»."));
-                sp.sendSystemMessage(Component.literal("§7 Данные заполняются §lодин раз§7, после чего вступят в силу в чате."));
-                sp.sendSystemMessage(Component.literal("§8§m======================================================"));
+    // Вызывается из AuthEvents сразу после успешного ввода или регистрации пароля!
+    public static void onPlayerAuthenticated(ServerPlayer sp) {
+        PassportData data = sp.getData(PassportData.PASSPORT);
+        refreshAllNames(sp);
 
-                sp.connection.send(new ClientboundSetTitlesAnimationPacket(10, 100, 20));
-                sp.connection.send(new ClientboundSetTitleTextPacket(Component.literal("§6§lАМАРТАЛОЭ")));
-                sp.connection.send(new ClientboundSetSubtitleTextPacket(Component.literal("§eНажмите [M] и заполните паспорт!")));
-                sp.playNotifySound(SoundEvents.UI_TOAST_CHALLENGE_COMPLETE, SoundSource.MASTER, 0.9f, 0.8f);
-            } else {
-                String displayName = data.rpName.isEmpty() ? sp.getName().getString() : data.rpName;
-                sp.sendSystemMessage(Component.literal("§6[Амарталоэ] §aДобро пожаловать в Амарталоэ, §e" + displayName + "§a!"));
-            }
+        if (!data.isLocked) {
+            sp.sendSystemMessage(Component.literal("§8§m======================================================"));
+            sp.sendSystemMessage(Component.literal("§6§l Добро пожаловать в Амарталоэ и суровую Исономию!"));
+            sp.sendSystemMessage(Component.literal("§7 Мир разделен на фракции, законы и контракты Либры."));
+            sp.sendSystemMessage(Component.literal("§e➤ Нажмите клавишу §b[M]§e, чтобы открыть главное меню мода."));
+            sp.sendSystemMessage(Component.literal("§c⚠ Обязательно заполните паспорт персонажа во вкладке «ИГРОК»."));
+            sp.sendSystemMessage(Component.literal("§7 Данные заполняются §lодин раз§7, после чего вступят в силу в чате."));
+            sp.sendSystemMessage(Component.literal("§8§m======================================================"));
 
-            syncPlayerDataWithOnlineStatus(sp);
-            syncMailAndNotifyUnread(sp);
-            syncPartyAndGuildToPlayer(sp, true, true);
+            sp.connection.send(new ClientboundSetTitlesAnimationPacket(10, 100, 20));
+            sp.connection.send(new ClientboundSetTitleTextPacket(Component.literal("§6§lАМАРТАЛОЭ")));
+            sp.connection.send(new ClientboundSetSubtitleTextPacket(Component.literal("§eНажмите [M] и заполните паспорт!")));
+            sp.playNotifySound(SoundEvents.UI_TOAST_CHALLENGE_COMPLETE, SoundSource.MASTER, 0.9f, 0.8f);
+        } else {
+            String displayName = data.rpName.isEmpty() ? sp.getName().getString() : data.rpName;
+            sp.sendSystemMessage(Component.literal("§6[Амарталоэ] §aДобро пожаловать в Амарталоэ, §e" + displayName + "§a!"));
+        }
 
-            String myName = data.rpName.isEmpty() ? sp.getName().getString() : data.rpName;
-            for (String friendUuid : data.friends) {
-                if (friendUuid.startsWith("bot-")) continue;
-                try {
-                    ServerPlayer onlineFriend = sp.server.getPlayerList().getPlayer(UUID.fromString(friendUuid));
-                    if (onlineFriend != null) {
-                        onlineFriend.sendSystemMessage(Component.literal("§6[Друзья] §a● Ваш друг §e" + myName + " §aвошел на сервер!"));
-                        onlineFriend.playNotifySound(SoundEvents.NOTE_BLOCK_BELL.value(), SoundSource.MASTER, 0.7f, 1.2f);
-                        syncPlayerDataWithOnlineStatus(onlineFriend);
-                    }
-                } catch (Exception ignored) {}
-            }
+        syncPlayerDataWithOnlineStatus(sp);
+        syncMailAndNotifyUnread(sp);
+        syncPartyAndGuildToPlayer(sp, true, true);
+
+        String myName = data.rpName.isEmpty() ? sp.getName().getString() : data.rpName;
+        for (String friendUuid : data.friends) {
+            if (friendUuid.startsWith("bot-")) continue;
+            try {
+                ServerPlayer onlineFriend = sp.server.getPlayerList().getPlayer(UUID.fromString(friendUuid));
+                if (onlineFriend != null && !AuthEvents.isUnauthenticated(onlineFriend)) {
+                    onlineFriend.sendSystemMessage(Component.literal("§6[Друзья] §a● Ваш друг §e" + myName + " §aвошел на сервер!"));
+                    onlineFriend.playNotifySound(SoundEvents.NOTE_BLOCK_BELL.value(), SoundSource.MASTER, 0.7f, 1.2f);
+                    syncPlayerDataWithOnlineStatus(onlineFriend);
+                }
+            } catch (Exception ignored) {}
         }
     }
 
@@ -1066,7 +1081,6 @@ public class ServerEvents {
                 )
         );
 
-        // Команда управления секретными лорными книгами: /lorebook unlock|give <игрок> <id_книги>
         event.getDispatcher().register(
             Commands.literal("lorebook")
                 .requires(source -> source.hasPermission(2))
