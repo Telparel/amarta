@@ -30,7 +30,6 @@ public class AmarthaloeChatScreen extends ChatScreen {
 
     @Override
     protected void init() {
-        // Сохраняем текущий текст перед перестройкой виджетов (чтобы при клике по вкладкам текст не пропадал)
         String savedText = (this.input != null) ? this.input.getValue() : "";
 
         super.init();
@@ -128,7 +127,6 @@ public class AmarthaloeChatScreen extends ChatScreen {
             }
         }
 
-        // ВАЖНО: Всегда возвращаем фокус клавиатуры на поле ввода чата после добавления любых кнопок!
         if (this.input != null) {
             this.setFocused(this.input);
             this.input.setFocused(true);
@@ -137,13 +135,11 @@ public class AmarthaloeChatScreen extends ChatScreen {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
-        // Гарантируем, что поле ввода всегда в фокусе при нажатии любых клавиш
         if (this.input != null && !this.input.isFocused()) {
             this.setFocused(this.input);
             this.input.setFocused(true);
         }
 
-        // Прямая обработка Enter / Numpad Enter, чтобы команды из истории (на стрелку вверх) всегда отправлялись!
         if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
             if (this.input != null) {
                 String text = this.input.getValue();
@@ -155,7 +151,6 @@ public class AmarthaloeChatScreen extends ChatScreen {
             return true;
         }
 
-        // Обработка стрелок Вверх / Вниз для навигации по прошлым командам и сообщениям
         if (keyCode == GLFW.GLFW_KEY_UP) {
             this.moveInHistory(-1);
             if (this.input != null) {
@@ -178,6 +173,11 @@ public class AmarthaloeChatScreen extends ChatScreen {
 
     @Override
     public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+        // Не даем ванильному чату рисовать клиентские сообщения других модов поверх нашего окна
+        if (this.minecraft != null && this.minecraft.gui != null) {
+            this.minecraft.gui.getChat().clearMessages(false);
+        }
+
         int boxX = AmarthaloeChatHud.BOX_X;
         int boxY = this.height - AmarthaloeChatHud.BOX_HEIGHT - 38;
         int boxW = AmarthaloeChatHud.BOX_WIDTH;
@@ -281,7 +281,6 @@ public class AmarthaloeChatScreen extends ChatScreen {
         }
 
         boolean res = super.mouseClicked(mouseX, mouseY, button);
-        // После клика по любой вкладке или кнопке сразу возвращаем фокус на строку ввода чата!
         if (this.input != null) {
             this.setFocused(this.input);
             this.input.setFocused(true);
