@@ -3,6 +3,7 @@ package com.amarthaloe.client.chat;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.ChatScreen;
+import net.minecraft.client.gui.screens.InBedChatScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
 import net.neoforged.api.distmarker.Dist;
@@ -33,14 +34,15 @@ public class AmarthaloeChatHud {
         long ticks = mc.gui != null ? mc.gui.getGuiTicks() : 0;
         AmarthaloeChatManager.recordIncomingMessage(event.getMessage(), ticks);
 
-        // Блокируем попадание сообщения в ванильный HUD, чтобы он оставался чистым
         event.setCanceled(true);
     }
 
     @SubscribeEvent
     public static void onScreenOpening(ScreenEvent.Opening event) {
-        if (event.getNewScreen() instanceof ChatScreen orig && !(event.getNewScreen() instanceof AmarthaloeChatScreen)) {
-            // Если чат открыли клавишей "/" (команда), сохраняем начальный слэш!
+        // Не трогаем экран сна, чтобы работала кнопка «Покинуть кровать» и выход по Esc
+        if (event.getNewScreen() instanceof InBedChatScreen) return;
+
+        if (event.getNewScreen() instanceof ChatScreen && !(event.getNewScreen() instanceof AmarthaloeChatScreen)) {
             String initialText = "";
             if (Minecraft.getInstance().options.keyCommand.isDown()) {
                 initialText = "/";
@@ -56,6 +58,11 @@ public class AmarthaloeChatHud {
 
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.options.hideGui) return;
+
+        // Очищаем сообщения, которые сторонние моды добавляют напрямую в ванильный ChatComponent
+        // false гарантирует, что история отправленных команд (стрелка вверх) останется нетронутой
+        mc.gui.getChat().clearMessages(false);
+
         if (mc.screen instanceof AmarthaloeChatScreen) return;
 
         long currentTicks = mc.gui.getGuiTicks();
