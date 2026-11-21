@@ -25,29 +25,27 @@ import java.util.*;
 @EventBusSubscriber(modid = "amarthaloe", bus = EventBusSubscriber.Bus.MOD)
 public class MusicNetworking {
 
-    // Активные ансамбли на сервере: UUID игрока -> UUID напарника (или списка участников)
     private static final Map<UUID, Set<UUID>> ENSEMBLES = new HashMap<>();
     private static final Map<UUID, UUID> PENDING_INVITES = new HashMap<>();
 
-    // Список треков общего архива на клиенте
     public static List<String> CLIENT_SERVER_ARCHIVE = new ArrayList<>();
     public static String CLIENT_PENDING_INVITE_FROM = "";
     public static String CLIENT_ENSEMBLE_PARTNER = "";
 
-    // 1. Пакет проигрывания одной ноты в мире
-    public record PlayNotePayload(int instrumentId, int noteIndex, float volume) implements CustomPacketPayload {
-        public static final Type<PlayNotePayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("amarthaloe", "music_note"));
-        public static final StreamCodec<FriendlyByteBuf, PlayNotePayload> STREAM_CODEC = StreamCodec.composite(
-                ByteBufCodecs.VAR_INT, PlayNotePayload::instrumentId,
-                ByteBufCodecs.VAR_INT, PlayNotePayload::noteIndex,
-                ByteBufCodecs.FLOAT, PlayNotePayload::volume,
-                PlayNotePayload::new
+    // 1. Пакетная отправка нот (1 легкий пакет за тик вместо десятков)
+    public record PlayNotesBatchPayload(int instrumentId, byte[] notes, float volume) implements CustomPacketPayload {
+        public static final Type<PlayNotesBatchPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("amarthaloe", "music_notes_batch"));
+        public static final StreamCodec<FriendlyByteBuf, PlayNotesBatchPayload> STREAM_CODEC = StreamCodec.composite(
+                ByteBufCodecs.VAR_INT, PlayNotesBatchPayload::instrumentId,
+                ByteBufCodecs.BYTE_ARRAY, PlayNotesBatchPayload::notes,
+                ByteBufCodecs.FLOAT, PlayNotesBatchPayload::volume,
+                PlayNotesBatchPayload::new
         );
         @Override
         public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
-    // 2. Пакет передачи MIDI-файла (загрузка в архив сервера или скачивание с сервера)
+    // 2. Пакет передачи MIDI-файла
     public record MidiFilePayload(String trackName, byte[] data) implements CustomPacketPayload {
         public static final Type<MidiFilePayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("amarthaloe", "music_midi"));
         public static final StreamCodec<FriendlyByteBuf, MidiFilePayload> STREAM_CODEC = StreamCodec.composite(
@@ -59,7 +57,7 @@ public class MusicNetworking {
         public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
-    // 3. Пакет действий (запрос архива, приглашение в ансамбль, синхронный старт/стоп)
+    // 3. Пакет действий архива и ансамбля
     public record MusicActionPayload(String action, String arg1, String arg2) implements CustomPacketPayload {
         public static final Type<MusicActionPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("amarthaloe", "music_action"));
         public static final StreamCodec<FriendlyByteBuf, MusicActionPayload> STREAM_CODEC = StreamCodec.composite(
@@ -76,16 +74,14 @@ public class MusicNetworking {
     public static void register(final RegisterPayloadHandlersEvent event) {
         final PayloadRegistrar registrar = event.registrar("1");
 
-        // Проигрывание ноты (Клиент -> Сервер)
-        registrar.playToServer(PlayNotePayload.TYPE, PlayNotePayload.STREAM_CODEC, (payload, ctx) -> {
+        registrar.playToServer(PlayNotesBatchPayload.TYPE, PlayNotesBatchPayload.STREAM_CODEC, (payload, ctx) -> {
             ctx.enqueueWork(() -> {
                 if (ctx.player() instanceof ServerPlayer sp) {
-                    playNoteInWorld(sp, payload.instrumentId(), payload.noteIndex(), payload.volume());
+                    playNotesInWorld(sp, payload.instrumentId(), payload.notes(), payload.volume());
                 }
             });
         });
 
-        // Передача MIDI-файла (Двусторонняя: загрузка на сервер / скачивание клиенту)
         registrar.playBidirectional(MidiFilePayload.TYPE, MidiFilePayload.STREAM_CODEC, (payload, ctx) -> {
             ctx.enqueueWork(() -> {
                 if (ctx.flow().isServerbound() && ctx.player() instanceof ServerPlayer sp) {
@@ -102,7 +98,6 @@ public class MusicNetworking {
             });
         });
 
-        // Команды архива и ансамбля
         registrar.playBidirectional(MusicActionPayload.TYPE, MusicActionPayload.STREAM_CODEC, (payload, ctx) -> {
             ctx.enqueueWork(() -> {
                 if (ctx.flow().isServerbound() && ctx.player() instanceof ServerPlayer sp) {
@@ -114,17 +109,23 @@ public class MusicNetworking {
         });
     }
 
-    private static void playNoteInWorld(ServerPlayer sp, int instId, int noteIndex, float volume) {
-        int clampedNote = Math.clamp(noteIndex, 0, 24);
-        float pitch = (float) Math.pow(2.0, (clampedNote - 12.0) / 12.0);
-        float vol = Math.clamp(volume, 0.1f, 1.5f);
+    private static void playNotesInWorld(ServerPlayer sp, int instId, byte[] notes, float volume) {
+        if (notes == null || notes.length == 0) return;
 
         SoundEvent sound = getInstrumentSound(instId);
         ServerLevel level = sp.serverLevel();
-        level.playSound(null, sp.getX(), sp.getY(), sp.getZ(), sound, SoundSource.RECORDS, vol * 2.2f, pitch);
+        float vol = Math.clamp(volume, 0.1f, 1.5f);
 
-        // Цветная частица ноты над головой музыканта
-        double noteColor = clampedNote / 24.0;
+        int count = Math.min(notes.length, 4); // Не больше 4 одновременных нот, чтобы не забивать каналы OpenAL
+        for (int i = 0; i < count; i++) {
+            int clampedNote = Math.clamp(notes[i], 0, 24);
+            float pitch = (float) Math.pow(2.0, (clampedNote - 12.0) / 12.0);
+            // Передаем sp первым аргументом: звук слышат все вокруг, КРОМЕ самого музыканта (он слышит его локально без пинга!)
+            level.playSound(sp, sp.getX(), sp.getY(), sp.getZ(), sound, SoundSource.RECORDS, vol * 2.0f, pitch);
+        }
+
+        // Одна частица ноты на всю пачку — минимальная нагрузка на сервер
+        double noteColor = Math.clamp(notes[0], 0, 24) / 24.0;
         level.sendParticles(ParticleTypes.NOTE, sp.getX(), sp.getY() + 2.2, sp.getZ(), 0, noteColor, 0.0, 0.0, 1.0);
     }
 
