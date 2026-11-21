@@ -1,6 +1,8 @@
 package com.amarthaloe.music;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundSource;
 import net.neoforged.neoforge.network.PacketDistributor;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
@@ -12,6 +14,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class MidiPlayerEngine {
 
@@ -19,17 +25,32 @@ public class MidiPlayerEngine {
         "Арфа", "Гитара", "Флейта", "Бас", "Колокол", "Банджо", "Колокольчик", "Электро", "Барабан"
     };
 
-    public record ScheduledNote(long timeMs, int noteIndex, float volume, int trackIdx) {}
+    public record ScheduledNote(long timeMs, int noteIndex, float volume, int trackIdx, boolean isPercussion) {}
 
-    private static List<ScheduledNote> currentNotes = new ArrayList<>();
-    private static int playCursor = 0;
-    private static long playStartTimeMs = 0;
-    public static boolean isPlaying = false;
+    private static volatile List<ScheduledNote> currentNotes = new ArrayList<>();
+    private static volatile int playCursor = 0;
+    private static volatile long playStartTimeMs = 0;
+    public static volatile boolean isPlaying = false;
 
     public static String selectedFileName = "";
-    public static int selectedInstrument = 0;
-    public static int selectedTrackFilter = -1; // -1 = Все дорожки, 0..N = конкретная дорожка
+    public static volatile int selectedInstrument = 0;
+    public static volatile int selectedTrackFilter = -1;
     public static int loadedTrackCount = 0;
+
+    // Очередь нот для пакетной отправки на сервер раз в тик (без спама)
+    private static final ConcurrentLinkedQueue<Byte> SERVER_NOTE_QUEUE = new ConcurrentLinkedQueue<>();
+    private static volatile float lastBatchVolume = 1.0f;
+
+    // Высокоточный таймер (шаг 10 мс вместо 50 мс тика Майнкрафта)
+    private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "Amarthaloe-MidiTimer");
+        t.setDaemon(true);
+        return t;
+    });
+
+    static {
+        SCHEDULER.scheduleAtFixedRate(MidiPlayerEngine::preciseStep, 10, 10, TimeUnit.MILLISECONDS);
+    }
 
     public static Path getMusicDir() {
         Path dir = Minecraft.getInstance().gameDirectory.toPath().resolve("amarthaloe_music");
@@ -50,7 +71,6 @@ public class MidiPlayerEngine {
         return list;
     }
 
-    // Выбор .mid файла с диска через системный диалог
     public static String pickMidiFromDisk() {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             PointerBuffer filters = stack.mallocPointer(2);
@@ -88,7 +108,6 @@ public class MidiPlayerEngine {
         } catch (Exception ignored) {}
     }
 
-    // Разбор MIDI-файла в список нот с точным временем (в миллисекундах)
     public static boolean loadMidiFile(String fileName) {
         stopPlayback();
         try {
@@ -103,9 +122,8 @@ public class MidiPlayerEngine {
             int ppq = seq.getResolution();
             float divisionType = seq.getDivisionType();
 
-            // Собираем все события смены темпа (микросекунд на четверть)
             List<long[]> tempoEvents = new ArrayList<>();
-            tempoEvents.add(new long[]{0, 500000}); // Стандартные 120 BPM
+            tempoEvents.add(new long[]{0, 500000});
 
             for (Track t : tracks) {
                 for (int i = 0; i < t.size(); i++) {
@@ -128,30 +146,42 @@ public class MidiPlayerEngine {
                     MidiEvent ev = track.get(i);
                     if (ev.getMessage() instanceof ShortMessage sm) {
                         if (sm.getCommand() == ShortMessage.NOTE_ON && sm.getData2() > 0) {
+                            boolean isPercussion = (sm.getChannel() == 9); // Канал 9 (10-й в MIDI) — ударные
                             int midiKey = sm.getData1();
                             float vol = sm.getData2() / 127.0f;
                             int mcNote = mapMidiKeyToMinecraftNote(midiKey);
                             long ms = tickToMs(ev.getTick(), ppq, divisionType, tempoEvents);
-                            parsed.add(new ScheduledNote(ms, mcNote, vol, tIdx));
+                            parsed.add(new ScheduledNote(ms, mcNote, vol, tIdx, isPercussion));
                         }
                     }
                 }
             }
 
             parsed.sort(Comparator.comparingLong(ScheduledNote::timeMs));
-            currentNotes = parsed;
+
+            // Убираем дубликаты одной и той же ноты ближе 40 мс, чтобы не перегружать OpenAL
+            List<ScheduledNote> cleaned = new ArrayList<>();
+            long[] lastNoteTime = new long[25];
+            Arrays.fill(lastNoteTime, -1000);
+            for (ScheduledNote n : parsed) {
+                if (n.isPercussion() || (n.timeMs() - lastNoteTime[n.noteIndex()] >= 40)) {
+                    cleaned.add(n);
+                    if (!n.isPercussion()) lastNoteTime[n.noteIndex()] = n.timeMs();
+                }
+            }
+
+            currentNotes = cleaned;
             return !currentNotes.isEmpty();
         } catch (Exception e) {
             return false;
         }
     }
 
-    // Автоматический октавный сдвиг в диапазон нотных блоков Minecraft (F#3=54 .. F#5=78)
     private static int mapMidiKeyToMinecraftNote(int midiKey) {
         int key = midiKey;
         while (key < 54) key += 12;
         while (key > 78) key -= 12;
-        return key - 54; // 0..24
+        return key - 54;
     }
 
     private static long tickToMs(long targetTick, int ppq, float divisionType, List<long[]> tempoEvents) {
@@ -177,6 +207,7 @@ public class MidiPlayerEngine {
             loadMidiFile(selectedFileName);
         }
         if (currentNotes.isEmpty()) return;
+        SERVER_NOTE_QUEUE.clear();
         playCursor = 0;
         playStartTimeMs = System.currentTimeMillis();
         isPlaying = true;
@@ -185,30 +216,78 @@ public class MidiPlayerEngine {
     public static void stopPlayback() {
         isPlaying = false;
         playCursor = 0;
+        SERVER_NOTE_QUEUE.clear();
     }
 
-    // Вызывается каждый клиентский тик и отправляет ноты, время которых настало
-    public static void tickPlayback() {
-        if (!isPlaying || Minecraft.getInstance().player == null) return;
+    // Точный шаг каждые 10 мс: проигрывает ноту локально без задержек сети и складывает в очередь на сервер
+    private static void preciseStep() {
+        if (!isPlaying) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null || mc.level == null) {
+            isPlaying = false;
+            return;
+        }
 
+        List<ScheduledNote> notes = currentNotes;
         long elapsed = System.currentTimeMillis() - playStartTimeMs;
-        int sentThisTick = 0;
+        int inst = selectedInstrument;
+        int trackFilter = selectedTrackFilter;
+        boolean playingDrums = (inst == 8);
 
-        while (playCursor < currentNotes.size()) {
-            ScheduledNote n = currentNotes.get(playCursor);
+        int playedNow = 0;
+        while (playCursor < notes.size()) {
+            ScheduledNote n = notes.get(playCursor);
             if (n.timeMs() > elapsed) break;
 
-            if ((selectedTrackFilter == -1 || n.trackIdx() == selectedTrackFilter) && sentThisTick < 8) {
-                PacketDistributor.sendToServer(new MusicNetworking.PlayNotePayload(
-                        selectedInstrument, n.noteIndex(), n.volume()
-                ));
-                sentThisTick++;
+            boolean matchesTrack = (trackFilter == -1 || n.trackIdx() == trackFilter);
+            boolean matchesType = playingDrums ? n.isPercussion() : !n.isPercussion();
+
+            if (matchesTrack && matchesType && playedNow < 3) {
+                int noteIdx = n.noteIndex();
+                float vol = n.volume();
+                lastBatchVolume = vol;
+
+                // 1. Играем звук локально на рендер-потоке (0 мс пинга, ровный ритм!)
+                mc.execute(() -> {
+                    if (mc.player != null && mc.level != null) {
+                        float pitch = (float) Math.pow(2.0, (noteIdx - 12.0) / 12.0);
+                        SoundEvent sound = MusicNetworking.getInstrumentSound(inst);
+                        mc.level.playLocalSound(
+                                mc.player.getX(), mc.player.getY(), mc.player.getZ(),
+                                sound, SoundSource.RECORDS, vol * 1.4f, pitch, false
+                        );
+                    }
+                });
+
+                // 2. Кладем ноту в очередь на отправку другим игрокам
+                SERVER_NOTE_QUEUE.add((byte) noteIdx);
+                playedNow++;
             }
             playCursor++;
         }
 
-        if (playCursor >= currentNotes.size()) {
+        if (playCursor >= notes.size()) {
             isPlaying = false;
+        }
+    }
+
+    // Вызывается раз в клиентский тик (20 раз/сек) — отправляет накопленные ноты ОДНИМ пакетом на сервер
+    public static void tickPlayback() {
+        if (SERVER_NOTE_QUEUE.isEmpty() || Minecraft.getInstance().player == null) return;
+
+        List<Byte> batch = new ArrayList<>(4);
+        while (batch.size() < 4 && !SERVER_NOTE_QUEUE.isEmpty()) {
+            Byte b = SERVER_NOTE_QUEUE.poll();
+            if (b != null) batch.add(b);
+        }
+        SERVER_NOTE_QUEUE.clear(); // Сбрасываем лишний хвост, если нот было слишком много
+
+        if (!batch.isEmpty()) {
+            byte[] arr = new byte[batch.size()];
+            for (int i = 0; i < batch.size(); i++) arr[i] = batch.get(i);
+            PacketDistributor.sendToServer(new MusicNetworking.PlayNotesBatchPayload(
+                    selectedInstrument, arr, lastBatchVolume
+            ));
         }
     }
 }
