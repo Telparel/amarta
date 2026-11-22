@@ -2,6 +2,8 @@ package com.amarthaloe.music;
 
 import com.amarthaloe.data.PassportData;
 import com.amarthaloe.network.PassportNetworking;
+import com.mojang.brigadier.arguments.StringArgumentType;
+import net.minecraft.commands.Commands;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.chat.Component;
@@ -16,6 +18,7 @@ import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
@@ -32,7 +35,6 @@ public class MusicNetworking {
     public static String CLIENT_PENDING_INVITE_FROM = "";
     public static String CLIENT_ENSEMBLE_PARTNER = "";
 
-    // 1. Пакетная отправка нот (1 легкий пакет за тик вместо десятков)
     public record PlayNotesBatchPayload(int instrumentId, byte[] notes, float volume) implements CustomPacketPayload {
         public static final Type<PlayNotesBatchPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("amarthaloe", "music_notes_batch"));
         public static final StreamCodec<FriendlyByteBuf, PlayNotesBatchPayload> STREAM_CODEC = StreamCodec.composite(
@@ -45,7 +47,6 @@ public class MusicNetworking {
         public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
-    // 2. Пакет передачи MIDI-файла
     public record MidiFilePayload(String trackName, byte[] data) implements CustomPacketPayload {
         public static final Type<MidiFilePayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("amarthaloe", "music_midi"));
         public static final StreamCodec<FriendlyByteBuf, MidiFilePayload> STREAM_CODEC = StreamCodec.composite(
@@ -57,7 +58,6 @@ public class MusicNetworking {
         public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
-    // 3. Пакет действий архива и ансамбля
     public record MusicActionPayload(String action, String arg1, String arg2) implements CustomPacketPayload {
         public static final Type<MusicActionPayload> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("amarthaloe", "music_action"));
         public static final StreamCodec<FriendlyByteBuf, MusicActionPayload> STREAM_CODEC = StreamCodec.composite(
@@ -116,15 +116,13 @@ public class MusicNetworking {
         ServerLevel level = sp.serverLevel();
         float vol = Math.clamp(volume, 0.1f, 1.5f);
 
-        int count = Math.min(notes.length, 4); // Не больше 4 одновременных нот, чтобы не забивать каналы OpenAL
+        int count = Math.min(notes.length, 4);
         for (int i = 0; i < count; i++) {
             int clampedNote = Math.clamp(notes[i], 0, 24);
             float pitch = (float) Math.pow(2.0, (clampedNote - 12.0) / 12.0);
-            // Передаем sp первым аргументом: звук слышат все вокруг, КРОМЕ самого музыканта (он слышит его локально без пинга!)
             level.playSound(sp, sp.getX(), sp.getY(), sp.getZ(), sound, SoundSource.RECORDS, vol * 2.0f, pitch);
         }
 
-        // Одна частица ноты на всю пачку — минимальная нагрузка на сервер
         double noteColor = Math.clamp(notes[0], 0, 24) / 24.0;
         level.sendParticles(ParticleTypes.NOTE, sp.getX(), sp.getY() + 2.2, sp.getZ(), 0, noteColor, 0.0, 0.0, 1.0);
     }
@@ -150,6 +148,13 @@ public class MusicNetworking {
         }
     }
 
+    public static void broadcastRadioList(net.minecraft.server.MinecraftServer server) {
+        String data = MusicStorage.get(server).serializeRadioStations();
+        for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+            PacketDistributor.sendToPlayer(p, new MusicActionPayload("RADIO_LIST", data, ""));
+        }
+    }
+
     private static void handleServerAction(ServerPlayer sender, String action, String arg1, String arg2) {
         MusicStorage storage = MusicStorage.get(sender.server);
         PassportData sData = sender.getData(PassportData.PASSPORT);
@@ -159,6 +164,33 @@ public class MusicNetworking {
             case "REQ_ARCHIVE" -> {
                 String joined = String.join("|", storage.getTrackNames());
                 PacketDistributor.sendToPlayer(sender, new MusicActionPayload("ARCHIVE_LIST", joined, ""));
+                PacketDistributor.sendToPlayer(sender, new MusicActionPayload("RADIO_LIST", storage.serializeRadioStations(), ""));
+            }
+            case "RADIO_SHARE" -> {
+                // arg1 = ник цели (или пусто -> разослать ансамблю), arg2 = "freq|name|url"
+                if (!arg1.isEmpty()) {
+                    ServerPlayer target = PassportNetworking.findPlayerByNameOrRpName(sender, arg1);
+                    if (target == null || target.getUUID().equals(sender.getUUID())) {
+                        sender.sendSystemMessage(Component.literal("§c[Радио] Игрок «" + arg1 + "» не найден в сети."));
+                        return;
+                    }
+                    PacketDistributor.sendToPlayer(target, new MusicActionPayload("RADIO_RECEIVE_SHARE", senderName, arg2));
+                    sender.sendSystemMessage(Component.literal("§6[Радио] §aВы поделились волной с §e" + target.getDisplayName().getString() + "§a!"));
+                } else {
+                    Set<UUID> group = ENSEMBLES.get(sender.getUUID());
+                    if (group == null || group.size() <= 1) {
+                        sender.sendSystemMessage(Component.literal("§c[Радио] Введите ник игрока или вступите в ансамбль, чтобы поделиться волной."));
+                        return;
+                    }
+                    for (UUID uid : group) {
+                        if (uid.equals(sender.getUUID())) continue;
+                        ServerPlayer member = sender.server.getPlayerList().getPlayer(uid);
+                        if (member != null) {
+                            PacketDistributor.sendToPlayer(member, new MusicActionPayload("RADIO_RECEIVE_SHARE", senderName, arg2));
+                        }
+                    }
+                    sender.sendSystemMessage(Component.literal("§6[Радио] §aВолна отправлена участникам вашего ансамбля!"));
+                }
             }
             case "DOWNLOAD_TRACK" -> {
                 byte[] bytes = storage.getTrack(arg1);
@@ -249,6 +281,28 @@ public class MusicNetworking {
                     CLIENT_SERVER_ARCHIVE.addAll(Arrays.asList(arg1.split("\\|")));
                 }
             }
+            case "RADIO_LIST" -> {
+                RadioPlayerEngine.SERVER_STATIONS.clear();
+                if (!arg1.isEmpty()) {
+                    for (String line : arg1.split("\n")) {
+                        String[] p = line.split("\\|", 3);
+                        if (p.length == 3) {
+                            RadioPlayerEngine.SERVER_STATIONS.add(new RadioPlayerEngine.RadioStation(p[0], p[1], p[2], false));
+                        }
+                    }
+                }
+            }
+            case "RADIO_RECEIVE_SHARE" -> {
+                String[] p = arg2.split("\\|", 3);
+                if (p.length == 3) {
+                    RadioPlayerEngine.addCustomStation(p[0], p[1], p[2]);
+                    RadioPlayerEngine.playStation(p[0], p[1], p[2]);
+                    net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+                    if (mc.player != null) {
+                        mc.player.sendSystemMessage(Component.literal("§6[Радио] §e" + arg1 + " §fподелился волной §b" + p[0] + " FM «" + p[1] + "»§f! Она сохранена и включена."));
+                    }
+                }
+            }
             case "INVITE_RECEIVED" -> CLIENT_PENDING_INVITE_FROM = arg1;
             case "ENSEMBLE_JOINED" -> {
                 CLIENT_PENDING_INVITE_FROM = "";
@@ -257,6 +311,49 @@ public class MusicNetworking {
             case "ENSEMBLE_LEFT" -> CLIENT_ENSEMBLE_PARTNER = "";
             case "SYNC_START" -> MidiPlayerEngine.startSyncedPlayback();
             case "SYNC_STOP" -> MidiPlayerEngine.stopPlayback();
+        }
+    }
+
+    // Команды админа: /radio add <частота> <название> <url> и /radio remove <частота>
+    @EventBusSubscriber(modid = "amarthaloe", bus = EventBusSubscriber.Bus.GAME)
+    public static class RadioCommands {
+        @SubscribeEvent
+        public static void onRegisterCommands(RegisterCommandsEvent event) {
+            event.getDispatcher().register(
+                Commands.literal("radio")
+                    .requires(src -> src.hasPermission(2))
+                    .then(Commands.literal("add")
+                        .then(Commands.argument("freq", StringArgumentType.word())
+                            .then(Commands.argument("name", StringArgumentType.string())
+                                .then(Commands.argument("url", StringArgumentType.greedyString())
+                                    .executes(ctx -> {
+                                        String freq = StringArgumentType.getString(ctx, "freq");
+                                        String name = StringArgumentType.getString(ctx, "name");
+                                        String url = StringArgumentType.getString(ctx, "url");
+                                        MusicStorage.get(ctx.getSource().getServer()).addRadioStation(freq, name, url);
+                                        broadcastRadioList(ctx.getSource().getServer());
+                                        ctx.getSource().sendSuccess(() -> Component.literal("§6[Радио] §aВолна " + freq + " FM «" + name + "» добавлена на сервер!"), true);
+                                        return 1;
+                                    })
+                                )
+                            )
+                        )
+                    )
+                    .then(Commands.literal("remove")
+                        .then(Commands.argument("freq", StringArgumentType.word())
+                            .executes(ctx -> {
+                                String freq = StringArgumentType.getString(ctx, "freq");
+                                if (MusicStorage.get(ctx.getSource().getServer()).removeRadioStation(freq)) {
+                                    broadcastRadioList(ctx.getSource().getServer());
+                                    ctx.getSource().sendSuccess(() -> Component.literal("§6[Радио] §eВолна " + freq + " FM удалена."), true);
+                                } else {
+                                    ctx.getSource().sendFailure(Component.literal("§cВолна " + freq + " FM не найдена."));
+                                }
+                                return 1;
+                            })
+                        )
+                    )
+            );
         }
     }
 }
