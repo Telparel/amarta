@@ -1,6 +1,7 @@
 package com.amarthaloe.music;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.network.chat.Component;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundSource;
 import net.neoforged.neoforge.network.PacketDistributor;
@@ -37,11 +38,9 @@ public class MidiPlayerEngine {
     public static volatile int selectedTrackFilter = -1;
     public static int loadedTrackCount = 0;
 
-    // Очередь нот для пакетной отправки на сервер раз в тик (без спама)
     private static final ConcurrentLinkedQueue<Byte> SERVER_NOTE_QUEUE = new ConcurrentLinkedQueue<>();
     private static volatile float lastBatchVolume = 1.0f;
 
-    // Высокоточный таймер (шаг 10 мс вместо 50 мс тика Майнкрафта)
     private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "Amarthaloe-MidiTimer");
         t.setDaemon(true);
@@ -146,7 +145,7 @@ public class MidiPlayerEngine {
                     MidiEvent ev = track.get(i);
                     if (ev.getMessage() instanceof ShortMessage sm) {
                         if (sm.getCommand() == ShortMessage.NOTE_ON && sm.getData2() > 0) {
-                            boolean isPercussion = (sm.getChannel() == 9); // Канал 9 (10-й в MIDI) — ударные
+                            boolean isPercussion = (sm.getChannel() == 9);
                             int midiKey = sm.getData1();
                             float vol = sm.getData2() / 127.0f;
                             int mcNote = mapMidiKeyToMinecraftNote(midiKey);
@@ -159,7 +158,6 @@ public class MidiPlayerEngine {
 
             parsed.sort(Comparator.comparingLong(ScheduledNote::timeMs));
 
-            // Убираем дубликаты одной и той же ноты ближе 40 мс, чтобы не перегружать OpenAL
             List<ScheduledNote> cleaned = new ArrayList<>();
             long[] lastNoteTime = new long[25];
             Arrays.fill(lastNoteTime, -1000);
@@ -202,11 +200,23 @@ public class MidiPlayerEngine {
         return (long) (totalMicros / 1000.0);
     }
 
-    public static void startSyncedPlayback() {
-        if (currentNotes.isEmpty() && !selectedFileName.isEmpty()) {
-            loadMidiFile(selectedFileName);
+    public static void startSyncedPlayback(String suggestedTrack) {
+        if (currentNotes.isEmpty()) {
+            String toLoad = !selectedFileName.isEmpty() ? selectedFileName : suggestedTrack;
+            if (toLoad != null && !toLoad.isEmpty()) {
+                loadMidiFile(toLoad);
+            }
         }
-        if (currentNotes.isEmpty()) return;
+        if (currentNotes.isEmpty()) {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.player != null) {
+                String msg = (suggestedTrack != null && !suggestedTrack.isEmpty())
+                        ? "§c[Ансамбль] У вас не выбран трек и не найден файл «" + suggestedTrack + "». Выберите свой или скачайте из архива!"
+                        : "§c[Ансамбль] Сначала выберите MIDI-файл в списке!";
+                mc.player.sendSystemMessage(Component.literal(msg));
+            }
+            return;
+        }
         SERVER_NOTE_QUEUE.clear();
         playCursor = 0;
         playStartTimeMs = System.currentTimeMillis();
@@ -219,7 +229,6 @@ public class MidiPlayerEngine {
         SERVER_NOTE_QUEUE.clear();
     }
 
-    // Точный шаг каждые 10 мс: проигрывает ноту локально без задержек сети и складывает в очередь на сервер
     private static void preciseStep() {
         if (!isPlaying) return;
         Minecraft mc = Minecraft.getInstance();
@@ -247,7 +256,6 @@ public class MidiPlayerEngine {
                 float vol = n.volume();
                 lastBatchVolume = vol;
 
-                // 1. Играем звук локально на рендер-потоке (0 мс пинга, ровный ритм!)
                 mc.execute(() -> {
                     if (mc.player != null && mc.level != null) {
                         float pitch = (float) Math.pow(2.0, (noteIdx - 12.0) / 12.0);
@@ -259,7 +267,6 @@ public class MidiPlayerEngine {
                     }
                 });
 
-                // 2. Кладем ноту в очередь на отправку другим игрокам
                 SERVER_NOTE_QUEUE.add((byte) noteIdx);
                 playedNow++;
             }
@@ -271,7 +278,6 @@ public class MidiPlayerEngine {
         }
     }
 
-    // Вызывается раз в клиентский тик (20 раз/сек) — отправляет накопленные ноты ОДНИМ пакетом на сервер
     public static void tickPlayback() {
         if (SERVER_NOTE_QUEUE.isEmpty() || Minecraft.getInstance().player == null) return;
 
@@ -280,7 +286,7 @@ public class MidiPlayerEngine {
             Byte b = SERVER_NOTE_QUEUE.poll();
             if (b != null) batch.add(b);
         }
-        SERVER_NOTE_QUEUE.clear(); // Сбрасываем лишний хвост, если нот было слишком много
+        SERVER_NOTE_QUEUE.clear();
 
         if (!batch.isEmpty()) {
             byte[] arr = new byte[batch.size()];
