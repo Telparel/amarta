@@ -200,20 +200,21 @@ public class MidiPlayerEngine {
         return (long) (totalMicros / 1000.0);
     }
 
-    public static void startSyncedPlayback(String suggestedTrack) {
+    public static void startSyncedPlayback() {
+        if (currentNotes.isEmpty() && !selectedFileName.isEmpty()) {
+            loadMidiFile(selectedFileName);
+        }
+        // Если участник ансамбля не выбрал файл — автоматически берем первый доступный из папки
         if (currentNotes.isEmpty()) {
-            String toLoad = !selectedFileName.isEmpty() ? selectedFileName : suggestedTrack;
-            if (toLoad != null && !toLoad.isEmpty()) {
-                loadMidiFile(toLoad);
+            List<String> local = getLocalTracks();
+            if (!local.isEmpty()) {
+                loadMidiFile(local.get(0));
             }
         }
         if (currentNotes.isEmpty()) {
             Minecraft mc = Minecraft.getInstance();
             if (mc.player != null) {
-                String msg = (suggestedTrack != null && !suggestedTrack.isEmpty())
-                        ? "§c[Ансамбль] У вас не выбран трек и не найден файл «" + suggestedTrack + "». Выберите свой или скачайте из архива!"
-                        : "§c[Ансамбль] Сначала выберите MIDI-файл в списке!";
-                mc.player.sendSystemMessage(Component.literal(msg));
+                mc.player.sendSystemMessage(Component.literal("§c[Ансамбль] У вас не выбран MIDI-файл! Выберите трек или скачайте его из архива в [N]."));
             }
             return;
         }
