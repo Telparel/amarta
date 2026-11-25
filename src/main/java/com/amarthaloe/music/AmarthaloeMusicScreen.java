@@ -16,7 +16,6 @@ public class AmarthaloeMusicScreen extends Screen {
     private int leftPos;
     private int topPos;
 
-    // 0 = Мои мелодии, 1 = Архив сервера, 2 = Радио
     private int activeTab = 0;
     private int listScroll = 0;
 
@@ -38,7 +37,6 @@ public class AmarthaloeMusicScreen extends Screen {
 
         PacketDistributor.sendToServer(new MusicNetworking.MusicActionPayload("REQ_ARCHIVE", "", ""));
 
-        // 3 основные вкладки
         DarkButton localTab = new DarkButton(leftPos + 10, topPos + 24, 86, 18, Component.literal("Мои мелодии"), (b) -> {
             activeTab = 0;
             listScroll = 0;
@@ -141,6 +139,7 @@ public class AmarthaloeMusicScreen extends Screen {
             this.rebuildWidgets();
         }));
 
+        // Блок ансамбля: поле приглашения доступно всегда (можно звать несколько игроков)
         int ensY = topPos + 196;
         if (!MusicNetworking.CLIENT_PENDING_INVITE_FROM.isEmpty()) {
             this.addRenderableWidget(new DarkButton(leftPos + 196, ensY, 144, 18, Component.literal("§a✔ Принять ансамбль"), (b) -> {
@@ -148,30 +147,35 @@ public class AmarthaloeMusicScreen extends Screen {
                 MusicNetworking.CLIENT_PENDING_INVITE_FROM = "";
                 this.rebuildWidgets();
             }));
-        } else if (!MusicNetworking.CLIENT_ENSEMBLE_PARTNER.isEmpty()) {
-            this.addRenderableWidget(new DarkButton(leftPos + 228, ensY, 112, 18, Component.literal("§cПокинуть"), (b) -> {
-                PacketDistributor.sendToServer(new MusicNetworking.MusicActionPayload("ENSEMBLE_LEAVE", "", ""));
-                MusicNetworking.CLIENT_ENSEMBLE_PARTNER = "";
-                this.rebuildWidgets();
-            }));
         } else {
-            invitePlayerBox = new EditBox(this.font, leftPos + 10, ensY, 214, 18, Component.empty());
+            boolean inEnsemble = !MusicNetworking.CLIENT_ENSEMBLE_PARTNER.isEmpty();
+            int boxWidth = inEnsemble ? 156 : 214;
+
+            invitePlayerBox = new EditBox(this.font, leftPos + 10, ensY, boxWidth, 18, Component.empty());
             invitePlayerBox.setMaxLength(32);
-            invitePlayerBox.setHint(Component.literal("Ник или РП-имя для игры вместе...").withStyle(s -> s.withColor(0x555555)));
+            invitePlayerBox.setHint(Component.literal(inEnsemble ? "Позвать ещё игрока..." : "Ник или РП-имя...").withStyle(s -> s.withColor(0x555555)));
             this.addRenderableWidget(invitePlayerBox);
 
-            this.addRenderableWidget(new DarkButton(leftPos + 228, ensY, 112, 18, Component.literal("♫ Пригласить"), (b) -> {
+            this.addRenderableWidget(new DarkButton(leftPos + 10 + boxWidth + 4, ensY, inEnsemble ? 86 : 112, 18,
+                    Component.literal(inEnsemble ? "♫ +Игрок" : "♫ Пригласить"), (b) -> {
                 String target = invitePlayerBox.getValue().trim();
                 if (!target.isEmpty()) {
                     PacketDistributor.sendToServer(new MusicNetworking.MusicActionPayload("ENSEMBLE_INVITE", target, ""));
                     invitePlayerBox.setValue("");
                 }
             }));
+
+            if (inEnsemble) {
+                this.addRenderableWidget(new DarkButton(leftPos + 260, ensY, 80, 18, Component.literal("§cПокинуть"), (b) -> {
+                    PacketDistributor.sendToServer(new MusicNetworking.MusicActionPayload("ENSEMBLE_LEAVE", "", ""));
+                    MusicNetworking.CLIENT_ENSEMBLE_PARTNER = "";
+                    this.rebuildWidgets();
+                }));
+            }
         }
     }
 
     private void initRadioTab() {
-        // Громкость и кнопка выключения в верхней строке справа
         this.addRenderableWidget(new DarkButton(leftPos + 256, topPos + 24, 22, 18, Component.literal("-"), (b) -> {
             RadioPlayerEngine.adjustVolume(-0.1f);
             this.rebuildWidgets();
@@ -185,7 +189,6 @@ public class AmarthaloeMusicScreen extends Screen {
             this.rebuildWidgets();
         }));
 
-        // Список радиостанций (до 4 строк)
         List<RadioPlayerEngine.RadioStation> stations = RadioPlayerEngine.getAllStations();
         int maxRows = 4;
         listScroll = Math.clamp(listScroll, 0, Math.max(0, stations.size() - maxRows));
@@ -213,7 +216,6 @@ public class AmarthaloeMusicScreen extends Screen {
             }
         }
 
-        // Форма добавления своего радиопотока
         int addY = topPos + 148;
         radioFreqBox = new EditBox(this.font, leftPos + 10, addY, 52, 16, Component.empty());
         radioFreqBox.setMaxLength(8);
@@ -243,7 +245,6 @@ public class AmarthaloeMusicScreen extends Screen {
         this.addRenderableWidget(radioUrlBox);
         this.addRenderableWidget(saveRadioBtn);
 
-        // Поделиться текущей волной с игроком или ансамблем
         int shareY = topPos + 196;
         radioShareBox = new EditBox(this.font, leftPos + 10, shareY, 214, 18, Component.empty());
         radioShareBox.setMaxLength(32);
@@ -277,12 +278,14 @@ public class AmarthaloeMusicScreen extends Screen {
         if (activeTab != 2) {
             g.fill(leftPos + 10, topPos + 150, leftPos + boxW - 10, topPos + 151, 0xFF5A4832);
             g.fill(leftPos + 10, topPos + 178, leftPos + boxW - 10, topPos + 179, 0xFF5A4832);
-            g.drawString(this.font, "§6АНСАМБЛЬ (СИНХРОННАЯ ИГРА):", leftPos + 10, topPos + 184, 0xFFE0C068);
 
             if (!MusicNetworking.CLIENT_PENDING_INVITE_FROM.isEmpty()) {
+                g.drawString(this.font, "§6АНСАМБЛЬ (СИНХРОННАЯ ИГРА):", leftPos + 10, topPos + 184, 0xFFE0C068);
                 g.drawString(this.font, "§e" + MusicNetworking.CLIENT_PENDING_INVITE_FROM + " §fзовет сыграть!", leftPos + 10, topPos + 201, 0xFFFFFFFF);
             } else if (!MusicNetworking.CLIENT_ENSEMBLE_PARTNER.isEmpty()) {
-                g.drawString(this.font, "§a● В ансамбле с: §e" + MusicNetworking.CLIENT_ENSEMBLE_PARTNER, leftPos + 10, topPos + 201, 0xFFFFFFFF);
+                g.drawString(this.font, "§a● В ансамбле §7(можно звать ещё игроков)", leftPos + 10, topPos + 184, 0xFFFFFFFF);
+            } else {
+                g.drawString(this.font, "§6АНСАМБЛЬ (СИНХРОННАЯ ИГРА):", leftPos + 10, topPos + 184, 0xFFE0C068);
             }
         } else {
             g.fill(leftPos + 10, topPos + 132, leftPos + boxW - 10, topPos + 133, 0xFF5A4832);
